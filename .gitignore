@@ -1,0 +1,92 @@
+# Build outputs
+/build*/
+/out/
+/dist/
+
+# Compiled objects & libraries
+*.slo
+*.lo
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.gch
+*.pch
+*.lai
+*.la
+
+# Executables
+*.exe
+*.out
+*.app
+*.elf
+RISCV_TLM
+RISCV_VP
+riscv_vp_core
+
+# CMake / Build system
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CMakeDoxyfile.in
+CMakeDoxygenDefaults.cmake
+*.ninja
+.ninja_deps
+.ninja_log
+build.ninja
+
+# Logs & traces
+*.log
+*.csv
+
+# Large generated files
+fw_payload.asm
+
+# IDE / editor
+.idea/
+.vscode/
+.vs/
+.agent/
+CMakeSettings.json
+launch.vs.json
+*.swp
+*.dump
+
+# Temp / scratch files
+scratch/
+slab_downloaded.c
+*.bak
+
+# Visual Studio / MSBuild
+*.vcxproj*
+*.sln
+*.pdb
+*.ilk
+*.ipch
+*.tlog
+
+# Presentation files
+*.pptx
+*.ppt
+ppt_content.txt
+
+# Docs build output
+doc/html/
+doc/Drawings.odg
+
+# Misc
+*.d
+*.mod
+*.smod
+*.txt
+!CMakeLists.txt
+helper.ods
+dump
+.project
+.cproject
+.settings

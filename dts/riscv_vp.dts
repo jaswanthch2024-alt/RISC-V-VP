@@ -1,0 +1,75 @@
+/dts-v1/;
+
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "riscv-virtual-prototype";
+    model = "riscv-vp,cva6-cycle6";
+
+    chosen {
+        bootargs = "rdinit=/init rw console=ttyS0 earlycon=sbi keep_bootcon";
+        stdout-path = "/soc/uart@10000000:115200";
+        linux,initrd-start = <0x0 0x84000000>;
+        linux,initrd-end   = <0x0 0x8411dc1e>;
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        timebase-frequency = <1000>; // 1 kHz — matches actual CLINT tick rate (1ms/tick)
+
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            reg = <0>;
+            status = "okay";
+            compatible = "riscv";
+            riscv,isa = "rv64imacfd";
+            mmu-type = "riscv,sv39";
+
+            cpu0_intc: interrupt-controller {
+                #address-cells = <0>;
+                #interrupt-cells = <1>;
+                compatible = "riscv,cpu-intc";
+                interrupt-controller;
+            };
+        };
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0x08000000>; // 128 MB RAM
+    };
+
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        compatible = "simple-bus";
+        ranges;
+
+        clint@2000000 {
+            compatible = "riscv,clint0";
+            reg = <0x0 0x2000000 0x0 0x10000>;
+            interrupts-extended = <&cpu0_intc 3 &cpu0_intc 7>; // MSIP, MTIP
+        };
+
+        plic: plic@c000000 {
+            #address-cells = <0>;
+            #interrupt-cells = <1>;
+            compatible = "riscv,plic0";
+            reg = <0x0 0xc000000 0x0 0x4000000>;
+            interrupts-extended = <&cpu0_intc 9 &cpu0_intc 11>; // SEIP, MEIP
+            interrupt-controller;
+            riscv,ndev = <31>;
+        };
+
+        uart@10000000 {
+            compatible = "ns16550a";
+            reg = <0x0 0x10000000 0x0 0x100>;
+            interrupts = <1>;
+            interrupt-parent = <&plic>;
+            clock-frequency = <10000000>; // 10 MHz UART clock
+            reg-shift = <0>;
+            reg-io-width = <1>;
+        };
+    };
+};

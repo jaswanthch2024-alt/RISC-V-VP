@@ -1,0 +1,33 @@
+language: cpp
+os:
+ - linux
+script: 
+ - mkdir -p build && cd build
+ - cmake ..
+ - make -j 2
+compiler: 
+ - gcc
+
+ 
+before_install:
+ - sudo apt-get update
+ - sudo apt-get -y install libboost-all-dev libspdlog-dev
+ 
+install:
+ - cd ..
+ - wget --no-check-certificate http://www.accellera.org/images/downloads/standards/systemc/systemc-2.3.3.tar.gz
+ - tar xfvz systemc-2.3.3.tar.gz
+ - cd systemc-2.3.3
+ - mkdir build && cd build
+ - cmake .. -DCMAKE_CXX_STANDARD=17
+ - make -j 4 && make install
+ - cd ../..
+ - rm systemc-2.3.3.tar.gz
+ - git clone https://github.com/gabime/spdlog.git
+ - cd spdlog 
+ - cmake -H. -B_builds -DCMAKE_BUILD_TYPE=Release
+ - cmake --build _builds --config Release
+ - cmake -H. -B_builds -DCMAKE_INSTALL_PREFIX=install -DCMAKE_BUILD_TYPE=Release
+ - cmake --build _builds --target install
+ - cd ..
+ - cd RISCV-VP
