@@ -1,6 +1,7 @@
-# RISC-V TLM Virtual Prototype (RISCV-VP)
+# RISC-V Virtual Platform (RISCV-VP)
 
-A configurable, multi-timing model RISC-V instruction set simulator (Virtual Prototype) implemented in SystemC and TLM-2.0. This project supports both RV32IMAC and RV64IMAC instruction set architectures, offering a unified simulation environment that spans from fast functional simulation (Loosely-Timed) to cycle-accurate micro-architectural simulation.
+A cycle-accurate, CVA6-aligned RISC-V 64-bit virtual platform implemented in SystemC/TLM-2.0.
+Boots **Linux 6.1.0** to a BusyBox user-space shell on the 6-stage pipeline model.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
@@ -8,159 +9,413 @@ A configurable, multi-timing model RISC-V instruction set simulator (Virtual Pro
 
 ---
 
-## Project Overview
+## What This Is
 
-RISCV-VP is designed to bridge the gap between software development and hardware verification. The architecture allows switching between different timing abstractions within a single codebase to support various stages of design exploration.
-
-### Simulation Timing Tiers
-
-The simulator supports four distinct timing models depending on the required speed and accuracy:
-
-*   **LT (Loosely-Timed)**: Functional execution using Temporal Decoupling. This is the fastest tier (approaching ~100 MIPS), designed specifically for software verification, application testing, and booting operating systems.
-*   **AT (Approximately-Timed)**: Models transaction phases, bus contention, and protocol delays. Best suited for bus/interconnect latency studies and protocol analysis.
-*   **Cycle (2-Stage)**: A basic clock-synchronized hardware pipeline (Fetch/Execute) used for hardware-in-the-loop and basic timing checks.
-*   **Cycle6 (6-Stage)**: A highly detailed, cycle-accurate micro-architectural model aligned with the CVA6 (Ariane) application-class processor. It implements pipelined execution with hazard detection and branch prediction.
+RISCV-VP is a pre-silicon software validation platform. It models the microarchitecture of the
+**CVA6 (Ariane)** open-source application-class RISC-V processor at the cycle level, allowing
+software engineers to run real workloads (including a full Linux kernel) and obtain detailed
+pipeline performance statistics before silicon is available.
 
 ---
 
-## Current Focus & Work-in-Progress
+## Quick Start — Linux Boot
 
-The core development focus is on the **Cycle6 (6-Stage Pipeline)** model located in `src/CPU_P64_6_Cycle.cpp`.
-
-### 6-Stage Pipeline Specifications
-*   **Pipeline Structure**: Fetch → Decode → Issue → Execute → Writeback/Commit.
-*   **Hazard Handling**: Scoreboard-based hazard detection for Read-After-Write (RAW) sequences and resource conflicts.
-*   **Branch Prediction**: Reaches an IPC of ~0.816 using a modular branch predictor:
-    *   128-entry Branch Target Buffer (BTB)
-    *   256-entry 2-bit Branch History Table (BHT)
-    *   4-entry Return Address Stack (RAS)
-*   **Memory Subsystem**: Scoreboard hazard detection combined with a split store buffer.
-*   **Recent Improvements**: Fixed compilation errors and added missing RV64 word-level operations (`SLLIW`, `SRLIW`, `SRAIW`, `SLLW`, `SRLW`, `SRAW`).
-
----
-
-## Roadmap & What Needs To Be Done
-
-The following table summarizes active development priorities, missing features, and open tasks:
-
-### High Priority (Blocking Test Pass Rate)
-
-| Task / Feature | Status | Details |
-| :--- | :--- | :--- |
-| **Misaligned memory traps** | Failing | 8 RV64 and 5 RV32 test cases currently fail due to missing traps on unaligned loads/stores (`misalign-ld/lh/lw/sd/sh/sw`). We need to implement proper exception raising on unaligned access inside the BASE_ISA handlers (`src/BASE_ISA.cpp`). |
-| **Verify RV64 word-ops** | Pending | The newly implemented word-level opcodes (SLLIW, SRLIW, SRAIW, SLLW, SRLW, SRAW) need a full suite test pass to verify correctness under all pipeline hazard scenarios. |
-
-### Medium Priority
-
-| Task / Feature | Status | Details |
-| :--- | :--- | :--- |
-| **MMU / sv39 integration** | Missing | The Memory Management Unit exists in other functional models but is not yet wired into the Cycle6 pipeline. This integration is required to boot virtualized operating systems (like Linux) on the 6-stage model. |
-| **C-extension in Cycle6** | Isolated | Compressed instruction support was isolated to simplify hazards. It needs to be carefully re-integrated with the scoreboard hazard detection logic. |
-| **PLIC and DMA integration** | Stub Only | The Platform-Level Interrupt Controller (PLIC) and Direct Memory Access (DMA) are currently stubbed out in Cycle6 and need full timing integration. |
-
-### Low Priority
-
-| Task / Feature | Status | Details |
-| :--- | :--- | :--- |
-| **F-extension (Floating-Point)** | Stub Only | The interface header (`F_extension.h`) exists, but the floating-point unit and its pipeline stages are not yet implemented or integrated. |
-| **Cache hierarchy timing** | Missing | The current model supports TLB simulation, but lacks L1/L2 data/instruction cache timing and coherence penalty models. |
-| **Branch predictor tuning** | Functional | The current predictor works well but can be tuned further for higher prediction accuracy and branch classification. |
-
----
-
-## Test Coverage Summary
-
-We run standard RISC-V compliance and unit test suites to verify functional correctness:
-
-*   **RV64**: **56 / 64** tests passing. All 8 failures are due to missing misaligned memory access traps.
-*   **RV32**: **29 / 29** I-extension + C/M tests passing. 5 failures remain, all due to the same misaligned memory trap issue.
-
-*Fixing the unaligned trap logic in `src/BASE_ISA.cpp` is the highest impact target, as it will instantly close all 13 remaining test failures across the simulator.*
-
----
-
-## Build & Execution Instructions
-
-### Prerequisites
-*   CMake 3.10 or higher
-*   C++17 compliant compiler (GCC 7+, Clang 6+, MSVC 2019+)
-*   SystemC 2.3.3 (Bundled as a submodule)
-
-### Building from Source
-
-1.  **Clone the Repository with Submodules**:
-    ```bash
-    git clone --recurse-submodules https://github.com/jaswanthch2024-alt/RISCV-VP.git
-    cd RISCV-VP
-    ```
-
-2.  **Configure and Build**:
-    You can choose the timing tier during the CMake configuration step by setting the `TIMING_MODEL` variable:
-
-    *To build the 6-stage Cycle-Accurate model (Cycle6):*
-    ```bash
-    mkdir build && cd build
-    cmake -DTIMING_MODEL=CYCLE6 ..
-    make -j$(nproc)
-    ```
-
-    *To build the Loosely-Timed functional model (LT, Default):*
-    ```bash
-    mkdir build && cd build
-    cmake -DTIMING_MODEL=LT ..
-    make -j$(nproc)
-    ```
-
-### Execution Options
-
-Run the virtual prototype using the `RISCV_VP` executable:
 ```bash
-./RISCV_VP -f <hex_file_path> -R <32|64> [options]
+# Build
+mkdir -p build_cycle6 && cd build_cycle6
+cmake .. -DRISCV_RV64=ON -DRISCV_CYCLE6=ON && make -j$(nproc)
+cd ..
+
+# Run Linux
+./build_cycle6/RISCV_VP -R 64 \
+  --bios  boot/fw_jump.bin \
+  --dtb   boot/vp.dtb \
+  --kernel boot/Image \
+  --initrd boot/initramfs.cpio.gz
 ```
 
-*   `-f <file>`: Path to the input hex program.
-*   `-R <32|64>`: Select target architecture register width (32-bit or 64-bit).
-*   `-L <level>`: Logging level (0 = Critical, 3 = Info, 4 = Trace).
-*   `-D`: Enable the integrated GDB Remote Serial Protocol (RSP) server (default port `5005`) for source-level debugging.
+Expected output (reaches `~ #` BusyBox shell in ~200M cycles):
 
-**Example Running 64-bit Test:**
+```
+...
+[    0.000000] Linux version 6.1.0 ...
+[    0.486000] Run /init as init process
+RISCV-VP: Starting shell...
+~ #
+```
+
+---
+
+## Simulation Timing Tiers
+
+| Model | Flag | Speed | Use Case |
+|-------|------|-------|----------|
+| LT (Loosely-Timed) | `-R 64` (default) | ~100 MIPS | Fast functional, software debug |
+| AT (Approximately-Timed) | `--model at` | ~50 MIPS | Bus/interconnect latency analysis |
+| 2-Stage Cycle | `--model cycle2` | ~10 MIPS | Basic hardware timing |
+| **6-Stage Cycle (Cycle6)** | `-R 64` + Cycle6 build | ~2–5 MIPS | **Full micro-arch simulation** |
+
+---
+
+## System Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                        VPTop                             │
+│                                                          │
+│  ┌─────────────────┐    ┌──────────┐    ┌────────────┐  │
+│  │  CPURV64P6_Cycle│◄──►│ BusCtrl  │◄──►│  Memory    │  │
+│  │  (6-stage CVA6) │    │          │    │  (512 MB)  │  │
+│  └─────────────────┘    │          │◄──►│  CLINT     │  │
+│   ▲  ▲  ▲               │          │    │  PLIC      │  │
+│   │  │  │ IRQ lines      │          │◄──►│  UART      │  │
+│  timer msip ext          └──────────┘    └────────────┘  │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Physical Address Map
+
+| Address | Peripheral |
+|---------|-----------|
+| `0x0200_0000` | CLINT (timer + MSIP) |
+| `0x0C00_0000` | PLIC (external interrupts) |
+| `0x1000_0000` | UART 16550 (serial console) |
+| `0x8000_0000` | DRAM — 512 MB (OpenSBI + DTB + kernel + initrd) |
+| `0x8000_1000` | HTIF tohost (riscv-tests pass/fail) |
+
+### Boot Chain
+
+```
+fw_jump.bin  →  Linux 6.1.0  →  BusyBox initramfs  →  ~ #
+ (OpenSBI)      (S-mode)          (U-mode)
+```
+
+---
+
+## Cycle6 Pipeline — Microarchitecture Detail
+
+### Pipeline Stages
+
+```
+PCGen ──► Fetch ──► Decode ──► Issue ──► EX/MEM ──► Commit
+  1          2         3          4          5           6
+```
+
+| Stage | Responsibility |
+|-------|---------------|
+| PCGen | Next-PC: sequential / branch prediction / exception redirect |
+| Fetch | Instruction memory read, I-cache lookup, ITLB translation |
+| Decode | Instruction decode, immediate extraction, register index identification |
+| Issue | Operand read + forwarding, scoreboard allocation, hazard check |
+| EX/MEM | ALU, branch resolution, load/store (D-cache + store buffer), MUL/DIV/FPU |
+| Commit | In-order retirement, architectural register writeback, store drain to memory |
+
+### Hazard Handling
+
+| Hazard | Mechanism |
+|--------|-----------|
+| RAW (data) | Scoreboard `rd_clobber` + same-cycle forwarding from completed entries |
+| Load-use (D$ hit) | `load_hit_fu` defers result 1 cycle — correct 1-cycle stall penalty |
+| Load-use (D$ miss) | `dcache_miss_fu` defers result for `dcache_miss_penalty` (default 10) cycles |
+| Store-buffer partial overlap | Tri-state forward result: HIT / PARTIAL_OVERLAP / MISS; stalls on overlap |
+| Structural (MUL/DIV/FPU) | Issue stalls new instruction while FU is occupied |
+| Branch misprediction | Full pipeline flush + redirect from EX stage |
+| CSR RAW | Serialisation stall in Issue until all older instructions commit |
+| SYSTEM (ECALL/EBREAK) | Issue stalls until all multi-cycle FUs are idle |
+
+### Branch Predictor
+
+| Structure | Configuration | Algorithm |
+|-----------|--------------|-----------|
+| BTB | 128 entries, direct-mapped | Full-PC tag, stores predicted target |
+| BHT | 256 entries | 2-bit saturating counter (gshare) |
+| RAS | 4 entries | LIFO, call/return auto-detection |
+
+Mispredict penalty: **4–5 cycles** (full flush from EX stage).  
+Linux boot prediction accuracy: **63.8%** (kernel branches are difficult to predict).
+
+### Memory Hierarchy
+
+| Level | Size | Config | Miss Penalty |
+|-------|------|--------|-------------|
+| I-cache | 16 KB | 4-way, 64 B lines, LRU | 10 cycles |
+| D-cache | 32 KB | 8-way, 64 B lines, LRU | 10 cycles |
+| ITLB | 32 entries | Fully associative | 6 cycles (3-level PTW) |
+| DTLB | 32 entries | Fully associative | 6 cycles (3-level PTW) |
+| DRAM | 512 MB | Flat array | — (no L2 modelled) |
+
+Cache sizes match the CVA6 cv64a6 default configuration.
+
+### Functional Unit Latencies
+
+| Unit | Latency | Instructions |
+|------|---------|-------------|
+| ALU | 1 cycle | All integer arithmetic/logic |
+| Load (D$ hit) | 1 cycle + 1 stall | LB / LH / LW / LD |
+| Load (D$ miss) | 10 cycles | LB / LH / LW / LD |
+| Store | 0 (buffered) | SB / SH / SW / SD |
+| MUL | 2 cycles | MUL / MULH / MULHU / MULHSU / MULW |
+| DIV | 64 cycles | DIV / DIVU / REM / REMU + W-variants |
+| FPU | 2–14 cycles | F / D extension operations |
+| CSR | 1 cycle (at commit) | CSRRW / CSRRS / CSRRC / CSRRWI / … |
+
+### Store Buffer
+
+Split speculative/committed design (matching CVA6):
+
+- **4 speculative slots** — allocated at Issue, visible to forwarding logic
+- **4 committed slots** — drained to memory at Commit in-order
+- **Forwarding**: newest-first scan with tri-state result (HIT / PARTIAL_OVERLAP / MISS)
+- Partial overlap stalls the load until the overlapping store drains
+
+### Privilege Architecture
+
+| Feature | Status |
+|---------|--------|
+| M / S / U privilege modes | Implemented |
+| mstatus / sstatus (UXL/SXL = 2 at reset) | Implemented |
+| mie / mip / sie / sip | Implemented |
+| MTVEC / STVEC vectored trap delivery | Implemented |
+| MEPC / SEPC (correct value after MRET/SRET) | Implemented |
+| ECALL / EBREAK / MRET / SRET / WFI | Implemented |
+| PMP (4 regions) | Implemented |
+| Hardware performance counters (mcycle, minstret) | Implemented |
+
+### Virtual Memory — sv39
+
+| Feature | Detail |
+|---------|--------|
+| Address translation mode | sv39 (39-bit VA, 3-level page table) |
+| ITLB | 32-entry fully associative, global-bit aware |
+| DTLB | 32-entry fully associative |
+| Page table walker | Hardware 3-level walk, 2 cycles per PTE read |
+| sfence.vma | Full TLB flush including global entries (rs1=x0, rs2=x0) |
+| satp modes accepted | 0 (bare), 8 (sv39) — others silently ignored per spec |
+
+---
+
+## ISA Coverage
+
+| Extension | Description | Status |
+|-----------|-------------|--------|
+| RV64I | Base integer | Complete |
+| RV64M | Multiply / divide | Complete |
+| RV64A | Atomics (LR/SC, AMOs) | Complete |
+| RV64C | Compressed 16-bit instructions | Complete |
+| RV64F | Single-precision floating point | Complete |
+| RV64D | Double-precision floating point | Complete |
+| Zicsr | CSR instructions | Complete |
+| Zifencei | Instruction-fetch fence | Complete |
+
+---
+
+## Linux Boot Performance
+
+Measured at the point the BusyBox shell appears (151M instructions):
+
+```
+Architecture:     RV64IMAFDC (CVA6 6-Stage, M+S+U, sv39 MMU)
+Final Priv:       S-mode
+Cycles:           203,316,691
+Instructions:     151,070,193
+CPI:              1.35
+IPC:              0.743
+
+Stalls:           9,652,020
+Forwarded reads:  47,294,203     (RAW resolved by forwarding)
+MUL busy:         61,519  cycles
+DIV busy:         1,291,437 cycles
+
+I$ accesses:      ~164M
+I$ miss rate:     0.92%          (1,537,144 misses, 13,882,194 stall cycles)
+D$ accesses:      ~29M
+D$ miss rate:     1.43%          (422,993 misses, 3,857,040 stall cycles)
+Load-use stalls:  29,238,255     (1-cycle penalty per D$-hit / forwarded load)
+
+ITLB miss rate:   0.00%          (1,893 misses, 8,484 stall cycles)
+DTLB miss rate:   0.01%          (5,803 misses, 21,476 stall cycles, 7,696 PTW walks)
+
+Branches:         ~29M
+Mispredicts:      ~10.5M
+Predict rate:     63.8%
+Flushes:          10,546,948
+```
+
+---
+
+## Comparison with Real CVA6
+
+| Metric | This VP | Real CVA6 |
+|--------|---------|-----------|
+| IPC (Linux integer) | **0.743** | 0.6 – 0.8 |
+| CPI | **1.35** | 1.3 – 1.7 |
+| Pipeline depth | 6 stages | 6 stages |
+| Issue width | 1 (in-order) | 1 (in-order) |
+| I-cache | 16 KB / 4-way / 64 B | 16 KB / 4-way / 64 B ✓ |
+| D-cache | 32 KB / 8-way / 64 B | 32 KB / 8-way / 64 B ✓ |
+| Load-use stall | 1 cycle ✓ | 1 cycle |
+| MUL latency | 2 cycles ✓ | 2 cycles |
+| Branch mispredict penalty | 4–5 cycles | 6 cycles |
+| sv39 MMU | Yes ✓ | Yes |
+| L2 cache | Not modelled | 256 KB unified (optional) |
+| DRAM latency | Not modelled (all misses = 10 cyc) | ~100 cycles |
+
+The VP is **within ~10% of real CVA6 IPC** for Linux integer workloads. The primary accuracy
+gap is the absence of an L2 cache — real hardware would show lower IPC on memory-bound code
+because D$ misses escalate to L2/DRAM rather than resolving in a flat 10-cycle penalty.
+
+---
+
+## Known Limitations
+
+| Limitation | Notes |
+|------------|-------|
+| No L2 cache | D$ misses are cheaper than real HW; IPC slightly optimistic on memory-bound workloads |
+| DIV always 64 cycles | Real CVA6 terminates early for small operands (~20 cycles average) |
+| Branch prediction accuracy 63.8% on Linux | Real CVA6 ~80–90% with larger BHT; our gshare with 256 entries under-predicts kernel indirect branches |
+| RV32 6-stage model is not updated | Lacks cache model, CSR_File, MMU — suitable for bare-metal RV32 only |
+| No write-combining | Stores drain one at a time; real HW coalesces adjacent stores |
+| Single-core | No cache coherence protocol needed or modelled |
+
+---
+
+## Build Instructions
+
+### Dependencies
+
+- CMake ≥ 3.10
+- C++17 compiler (GCC 9+, Clang 10+)
+- SystemC 2.3.3+
+- Boost headers
+
+### Build
+
 ```bash
-./RISCV_VP -f ../tests/hex/robust_system_test.hex -R 64 -L 3
+mkdir -p build_cycle6 && cd build_cycle6
+cmake .. -DRISCV_RV64=ON -DRISCV_CYCLE6=ON
+make -j$(nproc)
+cd ..
+```
+
+### Rebuild after source changes
+
+```bash
+touch src/CPU_P64_6_Cycle.cpp inc/CPU_P64_6_Cycle.h
+cd build_cycle6 && make -j$(nproc)
+```
+
+---
+
+## Running
+
+### Linux boot
+
+```bash
+./build_cycle6/RISCV_VP -R 64 \
+  --bios  boot/fw_jump.bin \
+  --dtb   boot/vp.dtb \
+  --kernel boot/Image \
+  --initrd boot/initramfs.cpio.gz
+```
+
+### Linux boot with stats at a fixed instruction count
+
+```bash
+./build_cycle6/RISCV_VP -R 64 \
+  --bios  boot/fw_jump.bin \
+  --dtb   boot/vp.dtb \
+  --kernel boot/Image \
+  --initrd boot/initramfs.cpio.gz \
+  --max-instr 151070189
+```
+
+### Bare-metal hex program (RV64)
+
+```bash
+./build_cycle6/RISCV_VP -R 64 -f program.hex
+```
+
+### Bare-metal hex program (RV32)
+
+```bash
+./build_cycle6/RISCV_VP -R 32 -f program.hex
 ```
 
 ---
 
 ## Project Structure
 
-*   `inc/`: Header files for the processor cores, peripherals, and system interfaces.
-*   `src/`: Core implementation source files.
-    *   `src/CPU_P64_6_Cycle.cpp`: Implementation of the 6-stage pipelined core.
-    *   `src/CPU_P64_2.cpp`: Implementation of the Loosely-Timed (LT) processor core.
-    *   `src/BASE_ISA.cpp`: Core ISA execution and instruction handlers.
-*   `tests/`: Verification suites, hex binaries, and performance benchmarks (e.g., Dhrystone).
-*   `cmake/`: CMake build helpers and configuration scripts.
+```
+RISCV-VP/
+├── src/
+│   ├── CPU_P64_6_Cycle.cpp   # 6-stage CVA6-aligned pipeline (~2500 lines)
+│   ├── CPU_P32_6_Cycle.cpp   # 6-stage RV32 pipeline (bare-metal only)
+│   ├── VPTop.cpp             # SoC top-level wiring
+│   ├── VPMain.cpp            # Main entry point, CLI parsing
+│   ├── BusCtrl.cpp           # TLM bus + address decode
+│   ├── Memory.cpp            # 512 MB flat memory model
+│   └── BASE_ISA.cpp          # Shared ISA execution handlers
+├── inc/
+│   ├── CPU_P64_6_Cycle.h     # Pipeline state, latches, stats structs
+│   ├── Scoreboard.h          # CVA6-aligned scoreboard / ROB (32 entries)
+│   ├── StoreBuffer.h         # Split speculative/committed store buffer
+│   ├── Cache.h               # N-way set-associative LRU cache template
+│   ├── MMU.h                 # sv39 ITLB + DTLB + page table walker
+│   ├── CSR_File.h            # Full M/S/U CSR file + interrupt logic
+│   ├── CLINT.h               # Core-local interrupt controller
+│   ├── PLIC.h                # Platform-level interrupt controller
+│   ├── UART.h                # 16550 UART peripheral
+│   ├── TLB.h                 # TLB entry and flush logic
+│   └── VPTop.h               # SoC composition
+├── boot/
+│   ├── fw_jump.bin           # OpenSBI M-mode firmware
+│   ├── vp.dtb                # Device tree blob for this VP
+│   ├── Image                 # Linux 6.1.0 kernel image
+│   └── initramfs.cpio.gz     # BusyBox root filesystem
+├── docs/
+│   ├── Technical_Report.md   # Supervisor-facing technical summary
+│   └── BUGS_AND_ISSUES.md    # Complete bug log (24 entries, all fixed)
+└── dts/
+    └── riscv_vp.dts          # Device tree source
+```
 
 ---
 
-## Acknowledgments
+## Bug History
 
-This project is built upon the [RISC-V TLM Simulator](https://github.com/mariusmm/RISC-V-TLM) originally developed by **Màrius Montón**. The core TLM-2.0 infrastructure and functional models are based on his work. We have extended the simulator with:
-1.  **CVA6-Aligned Cycle-Accurate Pipeline**: A new 6-stage pipeline model.
-2.  **Multi-Timing Architecture**: Enhanced configuration system for switching between timing models.
+24 bugs were identified and fixed during development to achieve Linux boot.
+Full details with root cause, fix location, and discovery method in [`docs/BUGS_AND_ISSUES.md`](docs/BUGS_AND_ISSUES.md).
 
-## Citation
+| Category | Bugs | Worst Symptom Before Fix |
+|----------|------|--------------------------|
+| Reset / Initialisation | 4 | Timer interrupt storm from cycle 0 |
+| ISA correctness | 5 | Illegal instruction on common RV64 shift ops |
+| Store buffer | 2 | Linux SLUB `BUG_ON` at 50M instructions |
+| MMU / TLB | 2 | Instruction page faults after `free_initmem()` |
+| Privilege & interrupts | 3 | WFI freeze at 131M instructions |
+| Peripherals | 2 | UART ISR loop consuming 685M+ instructions |
+| Pipeline microarchitecture | 3 | IPC ~0.75 without branch predictor |
+| Simulation infrastructure | 3 | WFI not yielding simulation time; 32-bit `tohost` truncation; no load-use stall |
 
-If you use this simulator in your research, please cite the original work:
+---
 
-```bibtex
-@inproceedings{montonriscvtlm2020,
-    title = {A {RISC}-{V} {SystemC}-{TLM} simulator},
-    booktitle = {Workshop on {Computer} {Architecture} {Research} with {RISC}-{V} ({CARRV 2020})},
-    author = {Montón, Màrius},
-    year = {2020}
-}
-```
+## Acknowledgements
+
+Built on top of the [RISC-V TLM Simulator](https://github.com/mariusmm/RISC-V-TLM)
+originally developed by **Màrius Montón**. The TLM-2.0 infrastructure, memory model,
+and base ISA handlers originate from that work.
+
+Extensions added in this project:
+- Complete CVA6-aligned 6-stage cycle-accurate pipeline
+- sv39 MMU with ITLB, DTLB, and hardware page table walker
+- Full M/S/U privilege architecture and CSR file
+- L1 I/D cache model with LRU replacement
+- Load-use hazard detection (1-cycle stall)
+- CLINT, PLIC, UART peripherals wired for Linux
+- Store buffer with partial-overlap stall
+- Branch predictor (BTB + BHT + RAS)
+- Linux 6.1.0 boot support
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0. See the `LICENSE` file for details.
+GNU General Public License v3.0 — see `LICENSE` for details.
