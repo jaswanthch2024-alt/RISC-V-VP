@@ -300,7 +300,6 @@ cd ..
 ### Rebuild after source changes
 
 ```bash
-touch src/CPU_P64_6_Cycle.cpp inc/CPU_P64_6_Cycle.h
 cd build_cycle6 && make -j$(nproc)
 ```
 
