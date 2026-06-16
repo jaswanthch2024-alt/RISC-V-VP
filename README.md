@@ -251,7 +251,7 @@ Flushes:          10,546,948
 | CPI | **1.35** | 1.3 – 1.7 |
 | Pipeline depth | 6 stages | 6 stages |
 | Issue width | 1 (in-order) | 1 (in-order) |
-| Commit ports / width | 1 (single-commit, max IPC 1.0) | 2 (can retire up to 2 instructions/cycle) |
+| Commit ports / width | 2 (dual-commit loop, but average IPC capped at 1.0 by frontend) | 2 (can retire up to 2 instructions/cycle) |
 | I-cache | 16 KB / 4-way / 64 B | 16 KB / 4-way / 64 B ✓ |
 | D-cache | 32 KB / 8-way / 64 B | 32 KB / 8-way / 64 B ✓ |
 | Load-use stall | 1 cycle ✓ | 1 cycle |
@@ -263,7 +263,7 @@ Flushes:          10,546,948
 
 The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However, there are two primary timing and microarchitectural calibration gaps:
 1. **Absence of L2 Cache**: Real hardware would show lower IPC on memory-bound workloads as D$ misses escalate to L2/DRAM rather than resolving with a flat 10-cycle penalty.
-2. **Single-commit cap**: The real CVA6 features a dual-commit ROB capable of retiring up to 2 instructions per cycle. The VP is hard-capped at single-issue and single-commit, which underestimates absolute throughput by ~15-20% (IPC ~1.1 vs VP's 1.0 ceiling) for highly sequential, cache-warm code.
+2. **Single-Issue Frontend Bottleneck**: Although the commit stage implements a dual-commit loop (retiring up to 2 instructions/cycle to clear backlogs when out-of-order execution finishes behind a stalled instruction), the average IPC is mathematically capped at 1.0. This is because the frontend (Fetch, Decode, Issue) is strictly single-issue (1 instruction/cycle). In contrast, the real CVA6 has a decoupled frontend, instruction queue, and out-of-order execution pipelines that allow superscalar retirement and IPC > 1.0 (typically ~1.1) for sequential, warm-cache code.
 
 ---
 
@@ -272,7 +272,7 @@ The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However,
 | Limitation | Notes |
 |------------|-------|
 | No L2 cache | D$ misses are cheaper than real HW; IPC slightly optimistic on memory-bound workloads |
-| Single-commit cap | VP retires at most 1 instruction/cycle, missing CVA6's 2-commit throughput advantage (IPC capped at 1.0) |
+| Single-issue bottleneck | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear out-of-order backlogs, the strictly single-issue frontend (Fetch/Decode/Issue) cannot feed the pipeline fast enough to match CVA6's 1.1+ IPC on sequential code. |
 | DIV always 64 cycles | Real CVA6 terminates early for small operands (~20 cycles average) |
 | Branch prediction accuracy 63.8% on Linux | Real CVA6 ~80–90% with larger BHT; our gshare with 256 entries under-predicts kernel indirect branches |
 | RV32 6-stage model is not updated | Lacks cache model, CSR_File, MMU — suitable for bare-metal RV32 only |
