@@ -235,8 +235,9 @@ Full details in `docs/BUGS_AND_ISSUES.md`.
 
 | Metric | This VP | Real CVA6 (published) |
 |--------|---------|-----------------------|
-| IPC (integer workloads) | **0.743** | 0.6 – 0.8 |
+| IPC (integer workloads) | **0.743** | 0.6 – 0.8 (up to ~1.1 on superscalar-friendly sequential code) |
 | CPI | **1.35** | 1.3 – 1.7 |
+| Commit ports / width | **1 (single-commit, max IPC 1.0)** | 2 (can retire up to 2 instructions/cycle) |
 | Branch mispredict penalty | 4–5 cycles | 6 cycles |
 | I$ size / associativity | 16 KB / 4-way | 16 KB / 4-way ✓ |
 | D$ size / associativity | 32 KB / 8-way | 32 KB / 8-way ✓ |
@@ -246,7 +247,9 @@ Full details in `docs/BUGS_AND_ISSUES.md`.
 | L2 cache | **Not modelled** | 256 KB (optional) |
 | DRAM latency | **Not modelled** | ~100 cycles |
 
-The VP produces IPC within **~10% of real CVA6** for integer Linux workloads. The primary remaining gap is the absence of an L2 cache — all D$ misses are handled at a flat 10-cycle penalty rather than hitting a real L2/DRAM hierarchy, which would lower real-hardware IPC further on memory-bound code.
+The VP produces IPC within **~10% of real CVA6** for average Linux integer workloads. The two primary timing and microarchitectural calibration gaps are:
+1. **Absence of L2 Cache**: All D$ misses are handled at a flat 10-cycle penalty rather than hitting a real L2/DRAM hierarchy, which would lower real-hardware IPC on memory-bound workloads.
+2. **Single-commit Cap**: The real CVA6 features a dual-commit ROB (can retire 2 instructions per cycle). The VP's 6-stage model executes and commits at most 1 instruction per cycle, causing it to underestimate absolute throughput by 15-20% on highly sequential code where real CVA6 achieves an IPC of 1.1+.
 
 ---
 
@@ -255,6 +258,7 @@ The VP produces IPC within **~10% of real CVA6** for integer Linux workloads. Th
 | Limitation | Impact |
 |------------|--------|
 | No L2 cache | D$ misses cheaper than real HW; IPC slightly optimistic on memory-bound code |
+| Single-commit cap | VP commits at most 1 instruction/cycle, missing CVA6's 2-commit throughput advantage (IPC hard-capped at 1.0) |
 | DIV always 64 cycles | Real CVA6 early-terminates for small operands (~20 cycles avg) |
 | Branch prediction accuracy 63.8% | Real CVA6 ~80–90% on Linux with larger BHT |
 | RV32 model not updated | RV32 6-stage lacks cache model, CSR_File, MMU — bare-metal only |

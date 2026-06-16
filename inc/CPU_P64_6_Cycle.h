@@ -206,7 +206,7 @@ private:
     Scoreboard<32> scoreboard;
 
     // Commit-stage capture (reset each cycle in cycle_thread)
-    bool     commit_valid_this_cycle{false};
+    uint32_t commit_count_this_cycle{0};
     uint64_t committed_pc_this_cycle{0};
 
     // =========================================================================
@@ -277,7 +277,7 @@ private:
         bool id_valid;
         bool issue_valid;
         bool ex_valid;
-        bool commit_valid;     // A commit/retire happened this cycle
+        uint32_t commit_valid;     // Number of instructions committed this cycle
         bool is_stall_pcgen;
         bool is_stall_fetch;
         bool is_stall_issue;

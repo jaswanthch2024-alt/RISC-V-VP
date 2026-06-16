@@ -289,9 +289,9 @@ public:
     }
 
     // Tick machine counters — called once per cycle.
-    void tick_counters(bool instr_retired) {
+    void tick_counters(uint32_t num_retired) {
         mcycle++;
-        if (instr_retired) minstret++;
+        minstret += num_retired;
     }
 
     // Take a synchronous exception (trap to M or S mode depending on delegation).

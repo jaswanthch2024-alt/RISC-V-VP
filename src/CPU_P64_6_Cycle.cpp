@@ -120,7 +120,7 @@ void CPURV64P6_Cycle::cycle_thread() {
         }
 
         // Reset per-cycle commit capture
-        commit_valid_this_cycle = false;
+        commit_count_this_cycle = 0;
         committed_pc_this_cycle = 0;
         pending_csr_write.valid = false;
         global_cpu_cycle = stats.cycles;
@@ -181,7 +181,7 @@ void CPURV64P6_Cycle::cycle_thread() {
 
         // Update global cycle count and CSR hardware counters
         stats.cycles++;
-        csr.tick_counters(commit_valid_this_cycle);
+        csr.tick_counters(commit_count_this_cycle);
 
         // --- Pipeline Trace Recording ---
         // Record the state of every pipeline stage for visualization.
@@ -200,7 +200,7 @@ void CPURV64P6_Cycle::cycle_thread() {
             te.id_valid       = fetch_id_reg.valid;
             te.issue_valid    = id_issue_reg.valid;
             te.ex_valid       = issue_ex_reg.valid;
-            te.commit_valid   = commit_valid_this_cycle;
+            te.commit_valid   = commit_count_this_cycle;
             te.is_stall_pcgen = stall_pcgen;
             te.is_stall_fetch = stall_fetch;
             te.is_stall_issue = stall_issue;
@@ -2306,57 +2306,58 @@ void CPURV64P6_Cycle::Commit_stage() {
         }
     }
 
-    if (!scoreboard.head_ready()) return;
+    for (int port = 0; port < 2; ++port) {
+        if (!scoreboard.head_ready()) break;
 
-    const auto& entry   = scoreboard.get_head();
-    const int   head_idx = scoreboard.get_head_index();
+        const auto& entry   = scoreboard.get_head();
+        const int   head_idx = scoreboard.get_head_index();
 
-    // 1. Store commit: move from speculative queue to committed queue.
-    //    drain_one() above will write it to memory next cycle.
-    if (entry.is_store) {
-        if (store_buffer.commit_is_full()) {
-            return; // Stall commit until committed queue drains
-        }
-        store_buffer.commit_store(head_idx);
-    }
-
-    // 2. Architectural register update.
-    if (entry.rd != 0) {
-        if (entry.writes_to_fp_reg) {
-            auto& clob = scoreboard.fp_clobber[entry.rd];
-            if (clob.trans_id == head_idx) {
-                clob.busy     = false;
-                clob.trans_id = -1;
+        // 1. Store commit: move from speculative queue to committed queue.
+        //    drain_one() above will write it to memory next cycle.
+        if (entry.is_store) {
+            if (store_buffer.commit_is_full()) {
+                break; // Stall commit until committed queue drains
             }
+            store_buffer.commit_store(head_idx);
+        }
+
+        // 2. Architectural register update.
+        if (entry.rd != 0) {
+            if (entry.writes_to_fp_reg) {
+                auto& clob = scoreboard.fp_clobber[entry.rd];
+                if (clob.trans_id == head_idx) {
+                    clob.busy     = false;
+                    clob.trans_id = -1;
+                }
+            } else {
+                register_bank->setValue(entry.rd, entry.result);
+                auto& clob = scoreboard.rd_clobber[entry.rd];
+                if (clob.trans_id == head_idx) {
+                    clob.busy     = false;
+                    clob.trans_id = -1;
+                }
+            }
+        }
+
+        // 3. Statistics and trace.
+        stats.instructions++;
+        if (perf) perf->instructionsInc();
+        pending_priv_switch = false; // instruction committed → priv switch is architecturally visible
+        commit_count_this_cycle++;
+        committed_pc_this_cycle  = entry.pc;
+        pc_current               = entry.pc;
+
+        // Per-privilege instruction counter
+        if (csr.priv == PrivMode::M) stats.m_instrs++;
+        else if (csr.priv == PrivMode::S) {
+            stats.s_instrs++;
         } else {
-
-            register_bank->setValue(entry.rd, entry.result);
-            auto& clob = scoreboard.rd_clobber[entry.rd];
-            if (clob.trans_id == head_idx) {
-                clob.busy     = false;
-                clob.trans_id = -1;
-            }
+            stats.u_instrs++;
         }
+
+        // 4. Retire — advance scoreboard head pointer.
+        scoreboard.retire();
     }
-
-    // 3. Statistics and trace.
-    stats.instructions++;
-    if (perf) perf->instructionsInc();
-    pending_priv_switch = false; // instruction committed → priv switch is architecturally visible
-    commit_valid_this_cycle  = true;
-    committed_pc_this_cycle  = entry.pc;
-    pc_current               = entry.pc;
-
-    // Per-privilege instruction counter
-    if (csr.priv == PrivMode::M) stats.m_instrs++;
-    else if (csr.priv == PrivMode::S) {
-        stats.s_instrs++;
-    } else {
-        stats.u_instrs++;
-    }
-
-    // 4. Retire — advance scoreboard head pointer.
-    scoreboard.retire();
 }
 
 // =============================================================================
