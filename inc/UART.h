@@ -3,57 +3,179 @@
 #include "systemc"
 #include "tlm.h"
 #include "tlm_utils/simple_target_socket.h"
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <mutex>
+#include <deque>
+#include <thread>
+
+#ifndef _WIN32
+#include <termios.h>
+#include <unistd.h>
+#endif
 
 namespace riscv_tlm { namespace peripherals {
 
-// Minimal 16550-compatible UART with DLAB support.
-// Handles both 1-byte stride (reg-io-width=1) and 4-byte stride (reg-io-width=4).
+// 16550-compatible UART with bidirectional I/O.
 //
-// 4-byte stride offsets (QEMU virt style, reg-shift=2):
-//   0x00  RBR/THR/DLL  0x04 IER/DLM  0x08 IIR/FCR  0x0C LCR
-//   0x10  MCR          0x14 LSR       0x18 MSR       0x1C SCR
+// TX: writes go to std::cout.
+// RX: a background thread reads raw bytes from stdin and pushes them into a
+//     software FIFO.  An SC_THREAD (rx_monitor_process) fires the RDA interrupt
+//     into the PLIC every 50 µs of simulation time when unread data is waiting.
 //
-// 1-byte stride offsets:  0x0 RBR/THR/DLL, 0x1 IER/DLM, ... 0x7 SCR
+// 4-byte stride offsets (reg-shift=2):
+//   0x00 RBR/THR/DLL  0x04 IER/DLM  0x08 IIR/FCR  0x0C LCR
+//   0x10 MCR          0x14 LSR       0x18 MSR       0x1C SCR
+// 1-byte stride offsets: 0x0–0x7 map directly.
 
 class UART : public sc_core::sc_module {
 public:
     tlm_utils::simple_target_socket<UART> socket;
 
-    // Wire this callback to signal the PLIC when THRI changes state.
-    // Called with true when THRI bit is set in IER, false when cleared.
+    // Wire to PLIC: called with true to assert interrupt, false to deassert.
     std::function<void(bool)> set_uart_irq;
 
     SC_HAS_PROCESS(UART);
     explicit UART(sc_core::sc_module_name const& name)
-        : sc_module(name), socket("socket"), scr(0), dlab(false), m_ier(0), m_thre_ip(true) {
+        : sc_module(name), socket("socket"),
+          scr(0), dlab(false), m_ier(0), m_thre_ip(true)
+    {
         socket.register_b_transport(this, &UART::b_transport);
+        SC_THREAD(rx_monitor_process);
+        m_stdin_thread = std::thread(&UART::stdin_reader, this);
+        m_stdin_thread.detach();
+    }
+
+    ~UART() {
+        m_stop.store(true);
+        restore_terminal();
     }
 
 private:
     uint8_t scr;
-    bool    dlab;   // Divisor Latch Access Bit (LCR bit 7)
-    uint8_t m_ier;  // IER shadow register
-    bool    m_thre_ip; // Transmitter Holding Register Empty Interrupt Pending
+    bool    dlab;
+    uint8_t m_ier;
+    bool    m_thre_ip;
+
+    // RX FIFO — written by stdin thread, read by SystemC thread via b_transport.
+    std::mutex          rx_mutex;
+    std::deque<uint8_t> rx_fifo;
+
+    std::atomic<bool> m_stop{false};
+    std::thread       m_stdin_thread;
+
+#ifndef _WIN32
+    struct termios m_old_termios{};
+    bool           m_raw_mode{false};
+#endif
+
+    // -------------------------------------------------------------------------
+    // Interrupt logic (called from SystemC thread only)
+    // -------------------------------------------------------------------------
 
     void update_interrupts() {
-        bool active = (m_ier & 0x02) && m_thre_ip;
-        if (set_uart_irq) set_uart_irq(active);
+        bool thre_active = (m_ier & 0x02) && m_thre_ip;
+        bool rda_active  = (m_ier & 0x01) && !rx_fifo_empty_locked();
+        if (set_uart_irq) set_uart_irq(thre_active || rda_active);
     }
 
-    // Map raw byte offset → 16550 register index 0-7.
-    // 4-byte stride: offsets 0,4,8,...,28 → regs 0-7.
-    // 1-byte stride: offsets 0-7 → regs 0-7.
-    static unsigned reg_from_offset(uint64_t off) {
-        // 4-byte stride (reg-shift=2, QEMU virt): check first for aligned offsets
-        if ((off & 3) == 0 && off <= 0x1C)
-            return static_cast<unsigned>(off >> 2);         // 4-byte stride
-        // 1-byte stride fallback: odd offsets 1,2,3,5,6,7
-        if (off <= 7) return static_cast<unsigned>(off);
-        return 0xFF; // unmapped
+    // Peek at FIFO size under lock — used only inside SystemC thread.
+    bool rx_fifo_empty_locked() {
+        std::lock_guard<std::mutex> lk(rx_mutex);
+        return rx_fifo.empty();
     }
+
+    // Pop one byte under lock — used only inside SystemC thread.
+    uint8_t rx_pop() {
+        std::lock_guard<std::mutex> lk(rx_mutex);
+        uint8_t b = rx_fifo.front();
+        rx_fifo.pop_front();
+        return b;
+    }
+
+    // -------------------------------------------------------------------------
+    // SC_THREAD: periodically assert RDA interrupt when unread bytes are waiting.
+    // Runs every 50 µs of simulation time (~5000 cycles at 100 MHz).
+    // -------------------------------------------------------------------------
+
+    void rx_monitor_process() {
+        while (true) {
+            wait(sc_core::sc_time(50, sc_core::SC_US));
+            if ((m_ier & 0x01) && !rx_fifo_empty_locked()) {
+                update_interrupts();
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Host terminal raw-mode helpers (non-SystemC thread)
+    // -------------------------------------------------------------------------
+
+#ifndef _WIN32
+    void set_raw_mode() {
+        if (!isatty(STDIN_FILENO)) return;
+        tcgetattr(STDIN_FILENO, &m_old_termios);
+        struct termios raw = m_old_termios;
+        cfmakeraw(&raw);
+        raw.c_cc[VMIN]  = 1;
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        m_raw_mode = true;
+    }
+
+    void restore_terminal() {
+        if (m_raw_mode && isatty(STDIN_FILENO)) {
+            tcsetattr(STDIN_FILENO, TCSANOW, &m_old_termios);
+            m_raw_mode = false;
+        }
+    }
+#else
+    void set_raw_mode()    {}
+    void restore_terminal() {}
+#endif
+
+    // -------------------------------------------------------------------------
+    // Background stdin reader (runs in a detached std::thread)
+    // -------------------------------------------------------------------------
+
+    void stdin_reader() {
+        set_raw_mode();
+        while (!m_stop.load()) {
+            uint8_t ch;
+#ifndef _WIN32
+            int n = ::read(STDIN_FILENO, &ch, 1);
+#else
+            int c = _getch();
+            if (c < 0) break;
+            ch = static_cast<uint8_t>(c);
+            int n = 1;
+#endif
+            if (n <= 0) break;
+            {
+                std::lock_guard<std::mutex> lk(rx_mutex);
+                if (rx_fifo.size() < 64)
+                    rx_fifo.push_back(ch);
+            }
+        }
+        restore_terminal();
+    }
+
+    // -------------------------------------------------------------------------
+    // Register address decode
+    // -------------------------------------------------------------------------
+
+    static unsigned reg_from_offset(uint64_t off) {
+        if ((off & 3) == 0 && off <= 0x1C)
+            return static_cast<unsigned>(off >> 2);
+        if (off <= 7) return static_cast<unsigned>(off);
+        return 0xFF;
+    }
+
+    // -------------------------------------------------------------------------
+    // TLM b_transport (runs in SystemC thread)
+    // -------------------------------------------------------------------------
 
     void b_transport(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay) {
         (void)delay;
@@ -67,11 +189,10 @@ private:
                 case 0: // THR (DLAB=0) or DLL (DLAB=1)
                     if (!dlab) {
                         std::cout << static_cast<char>(val) << std::flush;
-                        m_thre_ip = false; // writing THR clears THRE interrupt
-                        m_thre_ip = true;  // immediately becomes empty again
+                        m_thre_ip = false;
+                        m_thre_ip = true;
                         update_interrupts();
                     }
-                    // DLL write silently ignored (affects baud rate, not needed for sim)
                     break;
                 case 1: // IER (DLAB=0) or DLM (DLAB=1)
                     if (!dlab) {
@@ -79,44 +200,55 @@ private:
                         bool new_thri = (val & 0x02) != 0;
                         m_ier = val;
                         if (new_thri && !old_thri) {
-                            m_thre_ip = true; // transition to enabled triggers interrupt
+                            m_thre_ip = true;
                         } else if (!new_thri) {
                             m_thre_ip = false;
                         }
                         update_interrupts();
                     }
                     break;
-                case 2: // FCR (write-only) — ignore
-                    break;
-                case 3: // LCR — update DLAB
-                    dlab = (val >> 7) & 1;
-                    break;
-                case 7: // SCR — scratch register
-                    scr = val;
-                    break;
-                default:
-                    break;
+                case 2: break; // FCR (write-only) — ignore
+                case 3: dlab = (val >> 7) & 1; break; // LCR
+                case 7: scr = val; break;              // SCR
+                default: break;
             }
         } else if (trans.get_command() == tlm::TLM_READ_COMMAND && len > 0) {
             uint32_t val = 0;
             switch (reg) {
-                case 0: val = 0;    break; // RBR: no RX data
+                case 0: // RBR
+                    if (!dlab && !rx_fifo_empty_locked()) {
+                        val = rx_pop();
+                        update_interrupts(); // clear RDA if FIFO now empty
+                    }
+                    break;
                 case 1: val = m_ier; break; // IER
-                case 2: // IIR: THRI=0x02 (active-low pending is 0, so bit 0 is 0. bits 3:1 = 0b001. So val = 0x02)
-                    if ((m_ier & 0x02) && m_thre_ip) {
-                        val = 0x02;        // THRE interrupt pending
-                        m_thre_ip = false; // reading IIR clears THRE interrupt
-                        update_interrupts();
-                    } else {
-                        val = 0x01;        // no interrupt pending (bit 0 is 1)
+                case 2: // IIR — report highest-priority pending interrupt
+                    {
+                        bool rda  = (m_ier & 0x01) && !rx_fifo_empty_locked();
+                        bool thre = (m_ier & 0x02) && m_thre_ip;
+                        if (rda) {
+                            val = 0x04; // Received Data Available (priority 2)
+                        } else if (thre) {
+                            val = 0x02; // THRE (priority 3)
+                            m_thre_ip = false;
+                            update_interrupts();
+                        } else {
+                            val = 0x01; // no interrupt pending
+                        }
                     }
                     break;
                 case 3: val = 0;    break; // LCR
                 case 4: val = 0;    break; // MCR
-                case 5: val = 0x60; break; // LSR: THRE(5)=1, TEMT(6)=1 — TX always ready
-                case 6: val = 0;    break; // MSR
-                case 7: val = scr;  break; // SCR
-                default: val = 0;   break;
+                case 5: // LSR
+                    {
+                        uint8_t lsr = 0x60; // THRE(5)=1, TEMT(6)=1 — TX always ready
+                        if (!rx_fifo_empty_locked()) lsr |= 0x01; // DR — data ready
+                        val = lsr;
+                    }
+                    break;
+                case 6: val = 0;   break; // MSR
+                case 7: val = scr; break; // SCR
+                default: val = 0;  break;
             }
             for (unsigned i = 0; i < len && i < 4; ++i)
                 ptr[i] = static_cast<uint8_t>((val >> (8 * i)) & 0xFF);
