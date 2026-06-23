@@ -229,6 +229,18 @@ Each entry has:
 
 ---
 
+### BUG-25: `TIME` CSR returning `mtime_shadow` (1MHz) instead of `mcycle` (100MHz)
+
+| Field | Detail |
+|-------|--------|
+| **Symptom** | Linux boot produces zero kernel output, hanging silently in early delay calibration. |
+| **Root Cause** | The `TIME` CSR read returned the CLINT's `mtime_shadow` counter (1MHz). The kernel's `__delay` function spins on `get_cycles()` (reading `rdtime`). With `rdtime` ticking 100x slower, delay loops took 100x longer in simulation time, hanging early boot initialisation. |
+| **Fix** | `inc/CSR_File.h`: Reverted the read of `CSR::TIME` to fall-through and return `mcycle`. Removed the `mtime_shadow` register and its update in `src/CPU_P64_6_Cycle.cpp`. |
+| **Found Via** | Comparison with known working commit `5b81049` (boot_test5). |
+| **Tags** | `csr` `timer` `timing` `linux` |
+
+---
+
 ## Category 6 — Peripherals
 
 ### BUG-18: UART THRE interrupt never cleared → interrupt storm
@@ -319,6 +331,18 @@ Each entry has:
 
 ---
 
+### BUG-26: Missing `setsid` and `/dev` nodes in repacked initramfs
+
+| Field | Detail |
+|-------|--------|
+| **Symptom** | BusyBox init crashed with Segmentation fault and Kernel panic after reporting `/init: exec: line 9: setsid: not found`. |
+| **Root Cause** | The repacked initramfs did not contain a `setsid` symlink to `busybox` in `/bin/`, and lacked pre-created `/dev/console`, `/dev/null`, and `/dev/ttyS0` device nodes due to normal user extraction. |
+| **Fix** | Unpacked `boot/initramfs.cpio.gz.bak` under `fakeroot` to preserve device nodes. Added `setsid -> busybox` symlink in `bin/` and updated `/init` with a clean `PATH` export. Repacked everything under `fakeroot`. |
+| **Found Via** | Init execution logs showing setsid not found error. |
+| **Tags** | `initramfs` `busybox` `setsid` `device-nodes` |
+
+---
+
 ## Summary Table
 
 | ID | Category | Component | Severity | Status |
@@ -347,6 +371,8 @@ Each entry has:
 | BUG-22 | Pipeline | Fetch stage | Medium | Fixed |
 | BUG-23 | Pipeline | C-extension | Low | Fixed |
 | BUG-24 | Simulation | WFI | High | Fixed |
+| BUG-25 | Privilege / CSR | CSR_File | High | Fixed |
+| BUG-26 | Simulation | initramfs | High | Fixed |
 
 ---
 
@@ -360,3 +386,5 @@ Each entry has:
 6. **tohost is always 64-bit in riscv-tests** — use a full 8-byte read; the pass/fail encoding is in the full 64-bit value.
 7. **WFI must yield simulation time** — without fast-forward the simulation wastes wall time spinning; with it, RCU stall warnings appear in the kernel log (harmless false positive from mtime jumps).
 8. **Store buffer partial overlaps are common in Linux** — SLUB and the page allocator do narrow stores followed by wide loads routinely. Tri-state forwarding result is required.
+9. **rdtime should return mcycle for fast delay calibration** — if `rdtime` is bound to a 1MHz clock (like `mtime`), kernel delay calibration spins for 100x longer in wall-clock time, starving other initialisation steps and causing early boot silent hangs.
+10. **Repacking initramfs requires setsid symlink and device nodes** — to support TTY job control and interactive shells, BusyBox requires `setsid` to be present (e.g. as a symlink to busybox) and standard nodes `/dev/console`, `/dev/null`, and `/dev/ttyS0` pre-created in the image. Unpacking/repacking must use `fakeroot` to preserve these node types.

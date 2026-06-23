@@ -384,7 +384,7 @@ RISCV-VP/
 
 ## Bug History
 
-24 bugs were identified and fixed during development to achieve Linux boot.
+26 bugs were identified and fixed during development to achieve Linux boot.
 Full details with root cause, fix location, and discovery method in [`docs/BUGS_AND_ISSUES.md`](docs/BUGS_AND_ISSUES.md).
 
 | Category | Bugs | Worst Symptom Before Fix |
@@ -393,10 +393,10 @@ Full details with root cause, fix location, and discovery method in [`docs/BUGS_
 | ISA correctness | 5 | Illegal instruction on common RV64 shift ops |
 | Store buffer | 2 | Linux SLUB `BUG_ON` at 50M instructions |
 | MMU / TLB | 2 | Instruction page faults after `free_initmem()` |
-| Privilege & interrupts | 3 | WFI freeze at 131M instructions |
+| Privilege & interrupts | 4 | WFI freeze at 131M instructions; hang in early delay loops |
 | Peripherals | 2 | UART ISR loop consuming 685M+ instructions |
 | Pipeline microarchitecture | 3 | IPC ~0.75 without branch predictor |
-| Simulation infrastructure | 3 | WFI not yielding simulation time; 32-bit `tohost` truncation; no load-use stall |
+| Simulation infrastructure | 4 | WFI not yielding simulation time; 32-bit `tohost` truncation; no load-use stall; setsid not found shell panic |
 
 ---
 
