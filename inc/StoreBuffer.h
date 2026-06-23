@@ -68,14 +68,21 @@ public:
 
     // Drain the oldest committed entry to memory (call once per cycle).
     bool drain_one(uint64_t& addr, uint64_t& data, int& size) {
-        if (commit_count == 0) return false;
-        addr = committed[commit_head].address;
-        data = committed[commit_head].data;
-        size = committed[commit_head].size;
-        committed[commit_head].valid = false;
-        commit_head = (commit_head + 1) % COMMIT_DEPTH;
-        commit_count--;
-        return true;
+        while (commit_count > 0) {
+            addr = committed[commit_head].address;
+            data = committed[commit_head].data;
+            size = committed[commit_head].size;
+            bool was_valid = committed[commit_head].valid;
+
+            committed[commit_head].valid = false;
+            commit_head = (commit_head + 1) % COMMIT_DEPTH;
+            commit_count--;
+
+            if (was_valid) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Load-to-store forwarding result.
