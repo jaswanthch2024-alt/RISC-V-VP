@@ -81,6 +81,7 @@ public:
         uint64_t m_instrs{0};            // Instructions committed in M-mode
         uint64_t s_instrs{0};            // Instructions committed in S-mode
         uint64_t u_instrs{0};            // Instructions committed in U-mode
+        uint64_t dual_commits{0};        // Cycles where 2 instructions committed (dual-issue)
 
         double get_cpi() const { return instructions > 0 ? (double)cycles / instructions : 0; }
         double get_ipc() const { return cycles > 0 ? (double)instructions / cycles : 0; }

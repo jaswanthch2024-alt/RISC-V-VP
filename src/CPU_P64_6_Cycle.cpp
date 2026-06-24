@@ -2924,6 +2924,9 @@ void CPURV64P6_Cycle::Commit_stage() {
     // 4. Retire — advance scoreboard head pointer.
     scoreboard.retire();
   }
+
+  if (commit_count_this_cycle == 2)
+    stats.dual_commits++;
 }
 
 // =============================================================================
@@ -3052,6 +3055,11 @@ void CPURV64P6_Cycle::printStats() const {
                 << " misses, " << stats.dtlb_miss_cycles << " stall cycles, "
                 << ms.ptw_walks << " PTW walks)\n";
   }
+  std::cout << "  Dual commits: " << stats.dual_commits
+            << "  (cycles where 2 instrs committed)\n";
+  if (stats.cycles > 0)
+    std::cout << "  Dual commit rate: " << std::fixed << std::setprecision(1)
+              << (100.0 * stats.dual_commits / stats.cycles) << "%\n";
   std::cout << "  Flushes:      " << stats.flushes << "\n";
   std::cout << "  Branches:     " << stats.branches << "\n";
   std::cout << "  Mispredicts:  " << stats.branch_mispredicts << "\n";

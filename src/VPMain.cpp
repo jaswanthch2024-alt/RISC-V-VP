@@ -275,6 +275,20 @@ int sc_main(int argc, char* argv[]) {
                     double ips = boot_wall_time > 0.0 ? boot_instructions / boot_wall_time : 0.0;
                     std::cout << "Boot IPS:          " << std::fixed << std::setprecision(2) << (ips / 1e6) << " MIPS\n";
                     std::cout << "========================================\n\n";
+
+#if defined(ENABLE_CYCLE6_MODEL)
+                    // Print full pipeline snapshot at boot time
+                    {
+                        auto* c64 = dynamic_cast<riscv_tlm::CPURV64P6_Cycle*>(g_top->cpu);
+                        auto* c32 = dynamic_cast<riscv_tlm::CPURV32P6_Cycle*>(g_top->cpu);
+                        if (c64 || c32) {
+                            std::cout << "=== Boot Pipeline Statistics (6-stage cycle-accurate) ===\n";
+                            if (c64) c64->printStats();
+                            else     c32->printStats();
+                            std::cout << "=========================================================\n\n";
+                        }
+                    }
+#endif
                 }
             } else {
                 match_idx = (ch == target[0]) ? 1 : 0;
