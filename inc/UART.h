@@ -37,6 +37,12 @@ public:
     // Wire to PLIC: called with true to assert interrupt, false to deassert.
     std::function<void(bool)> set_uart_irq;
 
+    // TX callback to observe characters output to standard output
+    std::function<void(char)> tx_callback;
+    void register_tx_callback(std::function<void(char)> cb) {
+        tx_callback = cb;
+    }
+
     SC_HAS_PROCESS(UART);
     explicit UART(sc_core::sc_module_name const& name)
         : sc_module(name), socket("socket"),
@@ -189,6 +195,9 @@ private:
                 case 0: // THR (DLAB=0) or DLL (DLAB=1)
                     if (!dlab) {
                         std::cout << static_cast<char>(val) << std::flush;
+                        if (tx_callback) {
+                            tx_callback(static_cast<char>(val));
+                        }
                         m_thre_ip = false;
                         m_thre_ip = true;
                         update_interrupts();

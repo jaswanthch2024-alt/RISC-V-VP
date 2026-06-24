@@ -42,18 +42,13 @@
 #include "spdlog/sinks/null_sink.h"
 
 static vp::VPTop *g_top = nullptr;
+static volatile std::sig_atomic_t g_interrupted = 0;
 
 static void intHandler(int dummy) {
-    if (g_top) {
-        delete g_top;
-        g_top = nullptr;
-    }
     (void)dummy;
-    if (sc_core::sc_get_status() != sc_core::SC_STOPPED) {
-        sc_core::sc_stop();
-    }
-    std::exit(0);
+    g_interrupted = 1;
 }
+
 
 struct Options {
     std::string hex_file;
@@ -218,6 +213,75 @@ int sc_main(int argc, char* argv[]) {
 
     auto wall_start = std::chrono::steady_clock::now();
 
+    bool boot_detected = false;
+    double boot_wall_time = 0.0;
+    sc_core::sc_time boot_sim_time = sc_core::SC_ZERO_TIME;
+    uint_fast64_t boot_instructions = 0;
+    uint64_t boot_cycles = 0;
+    bool boot_has_cycles = false;
+
+    if (g_top->uart) {
+        g_top->uart->register_tx_callback([&](char ch) {
+            static const std::string target = "Starting interactive shell...";
+            static size_t match_idx = 0;
+            if (boot_detected) return;
+
+            if (ch == target[match_idx]) {
+                match_idx++;
+                if (match_idx == target.length()) {
+                    boot_detected = true;
+                    auto now = std::chrono::steady_clock::now();
+                    std::chrono::duration<double> elapsed = now - wall_start;
+                    boot_wall_time = elapsed.count();
+                    boot_sim_time = sc_core::sc_time_stamp();
+                    boot_instructions = perf->getInstructions();
+
+                    // Retrieve cycles if applicable
+#if defined(ENABLE_CYCLE6_MODEL)
+                    auto* cpu64 = dynamic_cast<riscv_tlm::CPURV64P6_Cycle*>(g_top->cpu);
+                    auto* cpu32 = dynamic_cast<riscv_tlm::CPURV32P6_Cycle*>(g_top->cpu);
+                    if (cpu64) {
+                        boot_cycles = cpu64->stats.cycles;
+                        boot_has_cycles = true;
+                    } else if (cpu32) {
+                        boot_cycles = cpu32->stats.cycles;
+                        boot_has_cycles = true;
+                    }
+#elif defined(ENABLE_CYCLE_MODEL)
+                    auto* cpu64 = dynamic_cast<riscv_tlm::CPURV64P2_Cycle*>(g_top->cpu);
+                    auto* cpu32 = dynamic_cast<riscv_tlm::CPURV32P2_Cycle*>(g_top->cpu);
+                    if (cpu64) {
+                        boot_cycles = cpu64->getStats().total_cycles;
+                        boot_has_cycles = true;
+                    } else if (cpu32) {
+                        boot_cycles = cpu32->getStats().total_cycles;
+                        boot_has_cycles = true;
+                    }
+#endif
+
+                    std::cout << "\n\n========================================\n";
+                    std::cout << "         VP Boot Completed!\n";
+                    std::cout << "========================================\n";
+                    std::cout << "Boot Wall time:    " << std::fixed << std::setprecision(3) << boot_wall_time << " s\n";
+                    std::cout << "Boot Sim time:     " << boot_sim_time << "\n";
+                    std::cout << "Boot Instructions: " << boot_instructions << "\n";
+                    if (boot_has_cycles) {
+                        std::cout << "Boot Cycles:       " << boot_cycles << "\n";
+                        if (boot_instructions > 0) {
+                            std::cout << "Boot CPI:          " << std::fixed << std::setprecision(3) << (double)boot_cycles / boot_instructions << "\n";
+                            std::cout << "Boot IPC:          " << std::fixed << std::setprecision(3) << (double)boot_instructions / boot_cycles << "\n";
+                        }
+                    }
+                    double ips = boot_wall_time > 0.0 ? boot_instructions / boot_wall_time : 0.0;
+                    std::cout << "Boot IPS:          " << std::fixed << std::setprecision(2) << (ips / 1e6) << " MIPS\n";
+                    std::cout << "========================================\n\n";
+                }
+            } else {
+                match_idx = (ch == target[0]) ? 1 : 0;
+            }
+        });
+    }
+
     // Use a fine-grained quantum when an instruction limit is set so the check fires promptly.
     // At 100 MHz (10 ns/cycle), 10 µs = ~1000 cycles per quantum — well below any practical limit.
     const sc_core::sc_time quantum = (opts.max_instructions > 0)
@@ -228,6 +292,12 @@ int sc_main(int argc, char* argv[]) {
 
     while (true) {
         sc_core::sc_start(quantum);
+
+        if (g_interrupted) {
+            std::cout << "\n[Simulation Interrupted by User]\n";
+            sc_core::sc_stop();
+            break;
+        }
 
         if (opts.timeout_sec > 0) {
             auto now = std::chrono::steady_clock::now();
@@ -265,6 +335,24 @@ int sc_main(int argc, char* argv[]) {
     std::cout << "Wall time:    " << std::fixed << std::setprecision(3) << elapsed.count() << " s\n";
     std::cout << "Sim time:     " << sc_core::sc_time_stamp() << "\n";
     std::cout << "Instructions: " << perf->getInstructions() << "\n";
+
+    std::cout << "\n=== Boot Statistics Summary ===\n";
+    if (boot_detected) {
+        std::cout << "  Boot Wall time:    " << std::fixed << std::setprecision(3) << boot_wall_time << " s\n";
+        std::cout << "  Boot Sim time:     " << boot_sim_time << "\n";
+        std::cout << "  Boot Instructions: " << boot_instructions << "\n";
+        if (boot_has_cycles) {
+            std::cout << "  Boot Cycles:       " << boot_cycles << "\n";
+            if (boot_instructions > 0) {
+                std::cout << "  Boot CPI:          " << std::fixed << std::setprecision(3) << (double)boot_cycles / boot_instructions << "\n";
+                std::cout << "  Boot IPC:          " << std::fixed << std::setprecision(3) << (double)boot_instructions / boot_cycles << "\n";
+            }
+        }
+        double ips = boot_wall_time > 0.0 ? boot_instructions / boot_wall_time : 0.0;
+        std::cout << "  Boot IPS:          " << std::fixed << std::setprecision(2) << (ips / 1e6) << " MIPS\n";
+    } else {
+        std::cout << "  Boot was not completed (did not reach shell prompt).\n";
+    }
 
     // Print pipeline statistics
 #if defined(ENABLE_PIPELINED_ISS)

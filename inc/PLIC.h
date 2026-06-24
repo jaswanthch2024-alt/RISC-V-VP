@@ -27,6 +27,10 @@ public:
         threshold = 0;
         claim_complete = 0;
         irq_out.initialize(false);
+
+        SC_METHOD(update_output_process);
+        sensitive << m_update_irq_event;
+        dont_initialize();
     }
 
     // Raise an interrupt source (called by peripheral models)
@@ -112,13 +116,21 @@ private:
 
     // Drive irq_out high if any enabled pending source has priority > threshold
     void update_irq_out() {
+        bool target_state = false;
         for (uint32_t i = 1; i < MAX_SOURCES; ++i) {
             if ((pending_bits & (1u << i)) && (enabled_bits & (1u << i)) && priorities[i] > threshold) {
-                irq_out.write(true);
-                return;
+                target_state = true;
+                break;
             }
         }
-        irq_out.write(false);
+        if (target_state != m_irq_state) {
+            m_irq_state = target_state;
+            m_update_irq_event.notify(sc_core::SC_ZERO_TIME);
+        }
+    }
+
+    void update_output_process() {
+        irq_out.write(m_irq_state);
     }
 
     std::array<uint32_t, MAX_SOURCES> priorities;
@@ -127,5 +139,8 @@ private:
     uint32_t threshold;
     uint32_t claim_complete;
     uint32_t level_bits{0}; // bitmask of level-triggered sources currently asserted
+
+    sc_core::sc_event m_update_irq_event;
+    bool m_irq_state{false};
 };
 }} // namespace

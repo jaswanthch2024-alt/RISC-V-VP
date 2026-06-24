@@ -46,6 +46,19 @@ public:
     std::uint64_t getEndDumpAddress() override;
     bool isPipelined() const override { return true; }
 
+    struct Stats {
+        uint64_t cycles{0};
+        uint64_t instructions{0};
+        uint64_t stalls{0};
+        uint64_t branches{0};
+        uint64_t branch_mispredicts{0};
+        
+        double get_cpi() const { return instructions > 0 ? (double)cycles / instructions : 0; }
+        double get_ipc() const { return cycles > 0 ? (double)instructions / cycles : 0; }
+    };
+    Stats stats;
+    const Stats& getStats() const { return stats; }
+
     void printStats() const;
 
 private:
@@ -178,19 +191,8 @@ private:
     std::vector<uint32_t> ras;
 
     // =========================================================================
-    // Statistics
+    // Statistics (Moved to public section)
     // =========================================================================
-    struct Stats {
-        uint64_t cycles{0};
-        uint64_t instructions{0};
-        uint64_t stalls{0};
-        uint64_t branches{0};
-        uint64_t branch_mispredicts{0};
-        
-        double get_cpi() const { return instructions > 0 ? (double)cycles / instructions : 0; }
-        double get_ipc() const { return cycles > 0 ? (double)instructions / cycles : 0; }
-    };
-    Stats stats;
 
     // =========================================================================
     // Out-of-Order Execution Components

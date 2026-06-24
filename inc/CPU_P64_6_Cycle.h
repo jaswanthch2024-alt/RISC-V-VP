@@ -60,10 +60,39 @@ public:
     std::uint64_t getEndDumpAddress() override;
     bool isPipelined() const override { return true; }
 
+    struct Stats {
+        uint64_t cycles{0};
+        uint64_t instructions{0};
+        uint64_t stalls{0};
+        uint64_t branches{0};
+        uint64_t branch_mispredicts{0};
+        uint64_t flushes{0};
+        uint64_t forwarded_reads{0};     // Phase 1: RAW hazards resolved by forwarding
+        uint64_t load_store_forwards{0}; // Phase 2: Loads satisfied from store buffer
+        uint64_t mul_stall_cycles{0};    // Phase 3: Cycles MUL FU was busy (not idle)
+        uint64_t div_stall_cycles{0};    // Phase 3: Cycles DIV FU was busy (not idle)
+        uint64_t icache_misses{0};       // Phase 4: I$ miss count
+        uint64_t icache_miss_cycles{0};  // Phase 4: Cycles stalled on I$ miss
+        uint64_t dcache_misses{0};       // Phase 4: D$ miss count
+        uint64_t dcache_miss_cycles{0};  // Phase 4: Cycles stalled on D$ miss
+        uint64_t load_use_stall_cycles{0}; // Cycles stalled on 1-cycle load-use hazard
+        uint64_t itlb_miss_cycles{0};    // Phase 8: Cycles stalled on ITLB miss + PTW
+        uint64_t dtlb_miss_cycles{0};    // Phase 8: Cycles stalled on DTLB miss + PTW
+        uint64_t m_instrs{0};            // Instructions committed in M-mode
+        uint64_t s_instrs{0};            // Instructions committed in S-mode
+        uint64_t u_instrs{0};            // Instructions committed in U-mode
+
+        double get_cpi() const { return instructions > 0 ? (double)cycles / instructions : 0; }
+        double get_ipc() const { return cycles > 0 ? (double)instructions / cycles : 0; }
+    };
+    Stats stats;
+    const Stats& getStats() const { return stats; }
+
     void printStats() const;
     void dumpPipelineTrace(const std::string& filename) const;
 
     size_t trace_limit{100000};  // Max cycles to record — settable before sc_start()
+    size_t trace_idx{0};         // Circular trace buffer index
     peripherals::CLINT* clint_ptr{nullptr};  // for WFI fast-forward
     Registers<BaseType>*    register_bank{nullptr};
 
@@ -232,34 +261,8 @@ private:
     std::vector<uint64_t> ras;
 
     // =========================================================================
-    // Statistics
+    // Statistics (Moved to public section)
     // =========================================================================
-    struct Stats {
-        uint64_t cycles{0};
-        uint64_t instructions{0};
-        uint64_t stalls{0};
-        uint64_t branches{0};
-        uint64_t branch_mispredicts{0};
-        uint64_t flushes{0};
-        uint64_t forwarded_reads{0};     // Phase 1: RAW hazards resolved by forwarding
-        uint64_t load_store_forwards{0}; // Phase 2: Loads satisfied from store buffer
-        uint64_t mul_stall_cycles{0};    // Phase 3: Cycles MUL FU was busy (not idle)
-        uint64_t div_stall_cycles{0};    // Phase 3: Cycles DIV FU was busy (not idle)
-        uint64_t icache_misses{0};       // Phase 4: I$ miss count
-        uint64_t icache_miss_cycles{0};  // Phase 4: Cycles stalled on I$ miss
-        uint64_t dcache_misses{0};       // Phase 4: D$ miss count
-        uint64_t dcache_miss_cycles{0};  // Phase 4: Cycles stalled on D$ miss
-        uint64_t load_use_stall_cycles{0}; // Cycles stalled on 1-cycle load-use hazard
-        uint64_t itlb_miss_cycles{0};    // Phase 8: Cycles stalled on ITLB miss + PTW
-        uint64_t dtlb_miss_cycles{0};    // Phase 8: Cycles stalled on DTLB miss + PTW
-        uint64_t m_instrs{0};            // Instructions committed in M-mode
-        uint64_t s_instrs{0};            // Instructions committed in S-mode
-        uint64_t u_instrs{0};            // Instructions committed in U-mode
-
-        double get_cpi() const { return instructions > 0 ? (double)cycles / instructions : 0; }
-        double get_ipc() const { return cycles > 0 ? (double)instructions / cycles : 0; }
-    };
-    Stats stats;
 
     // =========================================================================
     // Pipeline Trace (for visualization)

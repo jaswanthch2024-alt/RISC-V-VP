@@ -174,271 +174,150 @@ namespace riscv_tlm {
         }
 
         bool Exec_A_AMOSWAP() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
-            std::uint32_t aux;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
-            this->regs->setValue(rd, static_cast<int32_t>(data));
+            uint32_t new_val  = this->regs->getValue(rs2);  // read rs2 before writing rd
 
-            // swap
-            aux = this->regs->getValue(rs2);
-            this->regs->setValue(rs2, static_cast<int32_t>(data));
-
-            this->mem_intf->writeDataMem(mem_addr, aux, 4);
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, new_val, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOSWAP");
-
             return true;
         }
 
         bool Exec_A_AMOADD() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);  // read rs2 before writing rd
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // add
-            data = data + this->regs->getValue(rs2);
-
-            this->mem_intf->writeDataMem(mem_addr, data, 4);
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, old_val + operand, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOADD");
-
             return true;
         }
 
         bool Exec_A_AMOXOR() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // add
-            data = data ^ this->regs->getValue(rs2);
-
-            this->mem_intf->writeDataMem(mem_addr, data, 4);
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, old_val ^ operand, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOXOR");
-
             return true;
         }
 
         bool Exec_A_AMOAND() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // add
-            data = data & this->regs->getValue(rs2);
-
-            this->mem_intf->writeDataMem(mem_addr, data, 4);
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, old_val & operand, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOAND");
-
             return true;
         }
 
         bool Exec_A_AMOOR() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // add
-            data = data | this->regs->getValue(rs2);
-
-            this->mem_intf->writeDataMem(mem_addr, data, 4);
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, old_val | operand, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOOR");
-
             return true;
         }
 
         bool Exec_A_AMOMIN() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
-            std::uint32_t aux;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // min
-            aux = this->regs->getValue(rs2);
-            if ((int32_t) data < (int32_t) aux) {
-                aux = data;
-            }
-
-            this->mem_intf->writeDataMem(mem_addr, aux, 4);
+            uint32_t new_val = ((int32_t)old_val < (int32_t)operand) ? old_val : operand;
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, new_val, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOMIN");
-
             return true;
         }
 
         bool Exec_A_AMOMAX() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
-            std::uint32_t aux;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // >
-            aux = this->regs->getValue(rs2);
-            if ((int32_t) data > (int32_t) aux) {
-                aux = data;
-            }
-
-            this->mem_intf->writeDataMem(mem_addr, aux, 4);
+            uint32_t new_val = ((int32_t)old_val > (int32_t)operand) ? old_val : operand;
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, new_val, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOMAX");
-
             return true;
         }
 
         bool Exec_A_AMOMINU() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
-            std::uint32_t aux;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // min
-            aux = this->regs->getValue(rs2);
-            if (data < aux) {
-                aux = data;
-            }
-
-            this->mem_intf->writeDataMem(mem_addr, aux, 4);
+            uint32_t new_val = (old_val < operand) ? old_val : operand;
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, new_val, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOMINU");
-
             return true;
         }
 
         bool Exec_A_AMOMAXU() const {
-            std::uint32_t mem_addr;
-            int rd, rs1, rs2;
-            std::uint32_t data;
-            std::uint32_t aux;
+            int rd  = this->get_rd();
+            int rs1 = this->get_rs1();
+            int rs2 = this->get_rs2();
 
-            /* These instructions must be atomic */
-
-            rd = this->get_rd();
-            rs1 = this->get_rs1();
-            rs2 = this->get_rs2();
-
-            mem_addr = this->regs->getValue(rs1);
-            data = this->mem_intf->readDataMem(mem_addr, 4);
+            uint32_t mem_addr = this->regs->getValue(rs1);
+            uint32_t old_val  = this->mem_intf->readDataMem(mem_addr, 4);
             this->perf->dataMemoryRead();
+            uint32_t operand  = this->regs->getValue(rs2);
 
-            this->regs->setValue(rd, static_cast<int32_t>(data));
-
-            // max
-            aux = this->regs->getValue(rs2);
-            if (data > aux) {
-                aux = data;
-            }
-
-            this->mem_intf->writeDataMem(mem_addr, aux, 4);
+            uint32_t new_val = (old_val > operand) ? old_val : operand;
+            this->regs->setValue(rd, static_cast<int32_t>(old_val));
+            this->mem_intf->writeDataMem(mem_addr, new_val, 4);
             this->perf->dataMemoryWrite();
-
-            this->logger->debug("{} ns. PC: 0x{:x}. A.AMOMAXU");
-
             return true;
         }
 

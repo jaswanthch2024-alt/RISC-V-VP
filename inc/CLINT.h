@@ -54,14 +54,14 @@ private:
 
     void tick() {
         while (true) {
-            // Tick at 1ms intervals of simulation time.
-            // The Linux kernel programs mtimecmp = mtime + 1000 for a 1ms timer
-            // period at a 1MHz CLINT reference clock.  With 1µs ticks (one per
-            // CPU cycle) the timer fires every 1000 cycles — far too frequently
-            // for the kernel's syscall handlers which take hundreds of thousands
-            // of cycles to complete.  At 1ms per tick, one timer interrupt fires
-            // per ~1M CPU cycles, giving the kernel adequate time between ticks.
-            wait(1000, sc_core::SC_US);
+            // Tick at 1µs intervals = 1MHz reference clock, matching DTS
+            // timebase-frequency = 1000000.  With CONFIG_HZ=250 the kernel
+            // programs delta = 1000000/250 = 4000 ticks per jiffy = 4ms of
+            // simulation time = ~400K CPU cycles between timer interrupts.
+            // Previous 1ms (1kHz) rate was 1000× too slow: the kernel computed
+            // mtimecmp = mtime + 4000 ticks which at 1kHz = 4 seconds of simtime
+            // per jiffy, starving rcu_sched for billions of cycles.
+            wait(1, sc_core::SC_US);
             ++m_mtime;
             m_update_event.notify();
         }
