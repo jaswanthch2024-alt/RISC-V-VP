@@ -319,8 +319,11 @@ private:
     Cache<64, 8> dcache;
 
     int icache_miss_remaining{0}; // Cycles until current I$ miss resolves
-    int icache_miss_penalty{10};  // Settable before sc_start()
-    int dcache_miss_penalty{10};  // Settable before sc_start()
+    int icache_miss_penalty{107};  // Settable before sc_start()
+    int dcache_miss_penalty{107};  // Settable before sc_start()
+    int store_drain_remaining{0};  // Active write-through store cycles remaining
+    int store_write_penalty{20};   // DRAM write-through latency penalty
+    int load_hit_penalty{5};       // AXI bus latency on hits (load-use stall)
 
     // CSR file — M+S+U privilege support (Phase 5/6/7).
     CSR_File csr;

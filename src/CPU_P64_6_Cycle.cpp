@@ -40,6 +40,7 @@ CPURV64P6_Cycle::CPURV64P6_Cycle(sc_core::sc_module_name const &name,
   d_inst = new D_extension<BaseType>(0, register_bank, mem_intf);
 
   next_pc = PC; // Initialize the Next Program Counter
+  store_drain_remaining = 0;
 
   // MMU: initialized here so it can use the already-constructed mem_intf.
   mmu = new MMU(mem_intf, /*ptw_mem_cycles=*/2);
@@ -1912,9 +1913,9 @@ void CPURV64P6_Cycle::EX_stage() {
         break;
       }
       stats.load_store_forwards++;
-      // 1-cycle load-use stall: same timing model as D$ hit.
+      // load-use stall: configured by load_hit_penalty to represent AXI bus latency on hits.
       load_hit_fu.busy = true;
-      load_hit_fu.remaining = 1;
+      load_hit_fu.remaining = load_hit_penalty;
       load_hit_fu.result = fwd_result_val;
       load_hit_fu.trans_id = issue_ex_reg.rob_index;
       load_hit_fu.rd = issue_ex_reg.rd;
@@ -1964,9 +1965,9 @@ void CPURV64P6_Cycle::EX_stage() {
           dcache_miss_fu.rd = issue_ex_reg.rd;
           multi_cycle_dispatched = true;
         } else {
-          // D$ hit: result available next cycle — 1-cycle load-use stall.
+          // D$ hit: result available next cycle — load-use stall configured by load_hit_penalty.
           load_hit_fu.busy = true;
-          load_hit_fu.remaining = 1;
+          load_hit_fu.remaining = load_hit_penalty;
           load_hit_fu.result = mem_result;
           load_hit_fu.trans_id = issue_ex_reg.rob_index;
           load_hit_fu.rd = issue_ex_reg.rd;
@@ -2842,9 +2843,14 @@ ex_done:
 // =============================================================================
 
 void CPURV64P6_Cycle::Commit_stage() {
+  if (store_drain_remaining > 0) {
+    store_drain_remaining--;
+  }
+
   // Always try to drain one committed store to memory each cycle,
   // independent of whether a new instruction is committing.
-  {
+  // Restricted by write-through DRAM latency stalls.
+  if (store_drain_remaining == 0) {
     uint64_t addr, data;
     int size;
     if (store_buffer.drain_one(addr, data, size)) {
@@ -2852,6 +2858,8 @@ void CPURV64P6_Cycle::Commit_stage() {
         mem_intf->writeDataMem64(addr, data, size);
       else
         mem_intf->writeDataMem(addr, static_cast<uint32_t>(data), size);
+
+      store_drain_remaining = store_write_penalty;
 
       // Log recent stores for post-mortem analysis
       auto &rs = recent_stores[recent_store_idx % RECENT_STORE_LOG_SIZE];
