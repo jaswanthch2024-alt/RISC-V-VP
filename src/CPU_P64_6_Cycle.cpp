@@ -133,16 +133,52 @@ void CPURV64P6_Cycle::cycle_thread() {
     // Move data from "Next" latches to "Current" latches to simulate clock edge
     // updates. When stall_ex is set (partial store-buffer overlap), keep ALL
     // latches unchanged so the load retries and upstream stages freeze.
-    if (stall_ex) {
-      // issue_ex_reg: unchanged (replay the load)
-      // Upstream latches: unchanged (frozen)
-      // stall_ex stays true; EX_stage will clear it if the overlap resolves.
-    } else {
+    // 1. Backend Transfer (EX Stage Latch)
+    if (!stall_ex) {
       issue_ex_reg = issue_ex_next;
-      id_issue_reg = id_issue_next;
-      fetch_id_reg = fetch_id_next;
-      pcgen_fetch_reg = pcgen_fetch_next;
     }
+
+    // 2. Midstage Transfer (Issue Stage Latch)
+    if (!stall_issue) {
+      id_issue_reg = id_issue_next;
+    }
+
+    // 3. Frontend Decoupled FIFO Transfer (Push to queue)
+    if (fetch_id_next.valid) {
+      if (fetch_queue.size() < FETCH_QUEUE_CAPACITY) {
+        fetch_queue.push_back({
+          fetch_id_next.pc,
+          fetch_id_next.instr,
+          fetch_id_next.is_compressed,
+          fetch_id_next.predicted_taken,
+          fetch_id_next.predicted_target,
+          fetch_id_next.is_ras_call,
+          fetch_id_next.is_ras_return
+        });
+      }
+      fetch_id_next.valid = false;
+    }
+
+    // 4. Decode Stage Latch Transfer (Pop from queue)
+    if (!stall_issue) {
+      if (!fetch_queue.empty()) {
+        auto entry = fetch_queue.front();
+        fetch_id_reg.pc = entry.pc;
+        fetch_id_reg.instr = entry.instr;
+        fetch_id_reg.is_compressed = entry.is_compressed;
+        fetch_id_reg.predicted_taken = entry.predicted_taken;
+        fetch_id_reg.predicted_target = entry.predicted_target;
+        fetch_id_reg.is_ras_call = entry.is_ras_call;
+        fetch_id_reg.is_ras_return = entry.is_ras_return;
+        fetch_id_reg.valid = true;
+        fetch_queue.erase(fetch_queue.begin());
+      } else {
+        fetch_id_reg.valid = false;
+      }
+    }
+
+    // 5. Fetch Stage Latch Transfer
+    pcgen_fetch_reg = pcgen_fetch_next;
 
     // --- Sync CLINT interrupt lines into mip ---
     if (timer_irq_in.read())
@@ -269,6 +305,12 @@ void CPURV64P6_Cycle::PCGen_stage() {
     pc_redirect_valid = false;
     trap_pending = false; // Trap redirect consumed
     pcgen_fetch_next.valid = false;
+    
+    // Decoupled frontend: flush instruction fetch queue and pipeline stages
+    fetch_queue.clear();
+    fetch_id_next.valid = false;
+    id_issue_next.valid = false;
+    issue_ex_next.valid = false;
     return;
   }
 
@@ -280,6 +322,12 @@ void CPURV64P6_Cycle::PCGen_stage() {
   }
 
   // 2. Stall Check
+  // Decoupled frontend: stall PCGen if instruction queue is full
+  if (fetch_queue.size() >= FETCH_QUEUE_CAPACITY) {
+    stall_pcgen = true;
+    return;
+  }
+
   // If a structural hazard or backpressure exists (e.g., ROB full), do not
   // update the PC.
   if (stall_pcgen) {
@@ -335,6 +383,12 @@ void CPURV64P6_Cycle::Fetch_stage() {
   if (flush_pipeline) {
     icache_miss_remaining = 0;
     fetch_id_next.valid = false;
+    return;
+  }
+
+  // Decoupled frontend: stall Fetch if instruction queue is full
+  if (fetch_queue.size() >= FETCH_QUEUE_CAPACITY) {
+    stall_fetch = true;
     return;
   }
 
@@ -1003,9 +1057,6 @@ void CPURV64P6_Cycle::Issue_stage() {
   // When EX is replaying a load (partial store-buffer overlap), freeze
   // upstream.
   if (stall_ex) {
-    // Keep upstream frozen: don't clear stall flags, don't emit.
-    stall_pcgen = true;
-    stall_fetch = true;
     stall_issue = true;
     issue_ex_next.valid = false;
     return;
@@ -1177,8 +1228,6 @@ void CPURV64P6_Cycle::Issue_stage() {
 
   if (need_stall) {
     stall_issue = true;
-    stall_fetch = true;
-    stall_pcgen = true;
     issue_ex_next.valid = false;
     stats.stalls++;
     return;
@@ -1195,8 +1244,6 @@ void CPURV64P6_Cycle::Issue_stage() {
        (id_issue_reg.opcode == 0x03 || id_issue_reg.opcode == 0x2F) &&
        (dcache_miss_fu.busy || load_hit_fu.busy))) {
     stall_issue = true;
-    stall_fetch = true;
-    stall_pcgen = true;
     issue_ex_next.valid = false;
     stats.stalls++;
     return;
@@ -1207,8 +1254,6 @@ void CPURV64P6_Cycle::Issue_stage() {
   // AMOs (0x2F) write directly to mem_intf at EX time for atomicity.
   if (id_issue_reg.opcode == 0x23 && store_buffer.is_full()) {
     stall_issue = true;
-    stall_fetch = true;
-    stall_pcgen = true;
     issue_ex_next.valid = false;
     stats.stalls++;
     return;
@@ -1220,8 +1265,6 @@ void CPURV64P6_Cycle::Issue_stage() {
   // or writing stale data.
   if (id_issue_reg.opcode == 0x2F && !store_buffer.is_empty()) {
     stall_issue = true;
-    stall_fetch = true;
-    stall_pcgen = true;
     issue_ex_next.valid = false;
     stats.stalls++;
     return;
@@ -1248,8 +1291,6 @@ void CPURV64P6_Cycle::Issue_stage() {
         load_hit_fu.busy;
     if (multi_cycle_in_flight) {
       stall_issue = true;
-      stall_fetch = true;
-      stall_pcgen = true;
       issue_ex_next.valid = false;
       stats.stalls++;
       return;
@@ -1260,8 +1301,6 @@ void CPURV64P6_Cycle::Issue_stage() {
   int rob_idx = scoreboard.allocate();
   if (rob_idx < 0) {
     stall_issue = true;
-    stall_fetch = true;
-    stall_pcgen = true;
     issue_ex_next.valid = false;
     stats.stalls++;
     return;

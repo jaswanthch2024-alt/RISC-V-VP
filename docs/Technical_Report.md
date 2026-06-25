@@ -249,7 +249,7 @@ Full details in `docs/BUGS_AND_ISSUES.md`.
 
 The VP produces IPC within **~10% of real CVA6** for average Linux integer workloads. The two primary timing and microarchitectural calibration gaps are:
 1. **Absence of L2 Cache**: All D$ misses are handled at a flat 10-cycle penalty rather than hitting a real L2/DRAM hierarchy, which would lower real-hardware IPC on memory-bound workloads.
-2. **Single-Issue Frontend Bottleneck**: Although the commit stage implements a dual-commit loop (retiring up to 2 instructions/cycle to clear backlogs when out-of-order execution finishes behind a stalled instruction), the average IPC is mathematically capped at 1.0. This is because the frontend (Fetch, Decode, Issue) is strictly single-issue (1 instruction/cycle). In contrast, the real CVA6 has a decoupled frontend, instruction queue, and out-of-order execution pipelines that allow superscalar retirement and IPC > 1.0 (typically ~1.1) for sequential, warm-cache code.
+2. **Lockstep Frontend Stalls**: Both the VP and the standard CVA6 are single-issue cores mathematically capped at a peak IPC of 1.0. However, the real CVA6 has a decoupled frontend, an instruction queue (FIFO), and independent execution pipelines. This allows it to fetch and decode instructions into a queue while the execution stage is stalled (e.g., on a cache miss), helping to smooth out pipeline bubbles. In contrast, the VP frontend operates in tighter lockstep, so any stall propagates upstream immediately, leading to slightly lower IPC under backpressure.
 
 ---
 
@@ -258,7 +258,7 @@ The VP produces IPC within **~10% of real CVA6** for average Linux integer workl
 | Limitation | Impact |
 |------------|--------|
 | No L2 cache | D$ misses cheaper than real HW; IPC slightly optimistic on memory-bound code |
-| Single-issue bottleneck | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear out-of-order backlogs, the strictly single-issue frontend (Fetch/Decode/Issue) cannot feed the pipeline fast enough to match CVA6's 1.1+ IPC on sequential code. |
+| Lockstep frontend stalls | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear backlogs, the lockstep frontend (Fetch/Decode/Issue) propagates stalls immediately rather than decoupling them via an instruction queue like the real CVA6. |
 | DIV always 64 cycles | Real CVA6 early-terminates for small operands (~20 cycles avg) |
 | Branch prediction accuracy 63.8% | Real CVA6 ~80–90% on Linux with larger BHT |
 | RV32 model not updated | RV32 6-stage lacks cache model, CSR_File, MMU — bare-metal only |

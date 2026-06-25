@@ -61,15 +61,15 @@ RISCV-VP: Starting shell...
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                        VPTop                             │
+│                          VPTop                           │
 │                                                          │
-│  ┌─────────────────┐    ┌──────────┐    ┌────────────┐  │
-│  │  CPURV64P6_Cycle│◄──►│ BusCtrl  │◄──►│  Memory    │  │
-│  │  (6-stage CVA6) │    │          │    │  (512 MB)  │  │
-│  └─────────────────┘    │          │◄──►│  CLINT     │  │
-│   ▲  ▲  ▲               │          │    │  PLIC      │  │
-│   │  │  │ IRQ lines      │          │◄──►│  UART      │  │
-│  timer msip ext          └──────────┘    └────────────┘  │
+│  ┌─────────────────┐     ┌──────────┐     ┌────────────┐ │
+│  │ CPURV64P6_Cycle │<===>│  BusCtrl │<===>│ Memory     │ │
+│  │ (6-stage CVA6)  │     │          │     │ (512 MB)   │ │
+│  └─────────────────┘     │          │<===>│ CLINT      │ │
+│   ^  ^  ^                │          │     │ PLIC       │ │
+│   │  │  │ IRQ lines      │          │<===>│ UART       │ │
+│  timer msip ext          └──────────┘     └────────────┘ │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -211,7 +211,7 @@ Split speculative/committed design (matching CVA6):
 
 ## Benchmark Results
 
-All benchmarks run on the 6-stage Cycle6 model at 100 MHz (10 ns/cycle).  
+All benchmarks run on the 6-stage Cycle6 model (without realistic DRAM latency / with flat cache-miss penalty) at 100 MHz (10 ns/cycle).  
 Co-sim = CVA6 Verilated RTL (`cv64a6_imafdc_sv39`, `NrCommitPorts=2`, matchlib NoC + DRAM).
 
 ### VP — Bare-Metal Benchmarks
@@ -254,17 +254,21 @@ The co-sim IPC is approximately half the VP IPC for compute-bound benchmarks. Th
 
 The VP commit stage implements a dual-commit loop (matching `NrCommitPorts=2` in CVA6) that can retire up to 2 instructions per cycle when both the current and next scoreboard entries are ready simultaneously.
 
-| Benchmark | Dual commit cycles | Dual commit rate | Notes |
-|-----------|-------------------|-----------------|-------|
-| long\_test3 | 237,544 | **11.1%** | Independent arithmetic pairs fire frequently |
-| robust\_stress | 0 | **0.0%** | Every loop iteration ends with a MUL stall — only one entry is ever ready at retirement |
-| cam\_bench | 403 | **6.7%** | Short sequences of independent loads/stores pair up |
+| Metric | long\_test3 | robust\_stress | cam\_bench | Linux boot |
+|--------|------------|----------------|-----------|------------|
+| Instructions | 1,900,393 | 8,881,052 | 5,732 | 139,114,192 |
+| Cycles | 2,138,000 | 10,859,000 | 6,000 | 190,270,446 |
+| Dual commits | 237,544 | 0 | 403 | 11,209,553 |
+| Dual commit rate | 11.1% | 0.0% | 6.7% | 5.9% |
+| IPC (with dual commit) | **0.889** | **0.818** | **0.955** | **0.731** |
+| IPC (single commit only) | 0.800 | 0.818 | 0.895 | 0.690 |
+| IPC gain | **+11.1%** | **0.0%** | **+6.7%** | **+5.9%** |
 
 ---
 
 ## Linux Boot Performance
 
-Measured at the point the BusyBox shell prompt (`~ #`) appears — boot-only, not including idle shell time.
+Measured at the point the BusyBox shell prompt (`~ #`) appears — boot-only, not including idle shell time. These results represent the VP model without realistic DRAM latency (using a flat 10-cycle cache miss penalty).
 
 | Metric | Value |
 |--------|-------|
@@ -280,6 +284,7 @@ Measured at the point the BusyBox shell prompt (`~ #`) appears — boot-only, no
 | U-mode instrs (init/BusyBox) | 195,507 |
 | Stalls | 10,478,093 |
 | Forwarded (RAW) | 34,305,614 |
+| LD/ST Fwd | 7,367 |
 | MUL busy cycles | 85,531 |
 | DIV busy cycles | 1,229,701 |
 | I$ accesses | 154,052,882 |
@@ -322,7 +327,7 @@ Linux boot IPC (0.731) is lower than bare-metal benchmarks (0.818–0.955) becau
 
 The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However, there are two primary timing and microarchitectural calibration gaps:
 1. **Absence of L2 Cache**: Real hardware would show lower IPC on memory-bound workloads as D$ misses escalate to L2/DRAM rather than resolving with a flat 10-cycle penalty.
-2. **Single-Issue Frontend Bottleneck**: Although the commit stage implements a dual-commit loop (retiring up to 2 instructions/cycle to clear backlogs when out-of-order execution finishes behind a stalled instruction), the average IPC is mathematically capped at 1.0. This is because the frontend (Fetch, Decode, Issue) is strictly single-issue (1 instruction/cycle). In contrast, the real CVA6 has a decoupled frontend, instruction queue, and out-of-order execution pipelines that allow superscalar retirement and IPC > 1.0 (typically ~1.1) for sequential, warm-cache code.
+2. **Lockstep Frontend Stalls**: Both the VP and the standard CVA6 are single-issue cores mathematically capped at a peak IPC of 1.0. However, the real CVA6 has a decoupled frontend, an instruction queue (FIFO), and independent execution pipelines. This allows it to fetch and decode instructions into a queue while the execution stage is stalled (e.g., on a cache miss), helping to smooth out pipeline bubbles. In contrast, the VP frontend operates in tighter lockstep, so any stall propagates upstream immediately, leading to slightly lower IPC under backpressure.
 
 ---
 
@@ -331,7 +336,7 @@ The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However,
 | Limitation | Notes |
 |------------|-------|
 | No L2 cache | D$ misses are cheaper than real HW; IPC slightly optimistic on memory-bound workloads |
-| Single-issue bottleneck | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear out-of-order backlogs, the strictly single-issue frontend (Fetch/Decode/Issue) cannot feed the pipeline fast enough to match CVA6's 1.1+ IPC on sequential code. |
+| Lockstep frontend stalls | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear backlogs, the lockstep frontend (Fetch/Decode/Issue) propagates stalls immediately rather than decoupling them via an instruction queue like the real CVA6. |
 | DIV always 64 cycles | Real CVA6 terminates early for small operands (~20 cycles average) |
 | Branch prediction accuracy 63.7% on Linux | Real CVA6 ~80–90% with larger BHT; our gshare with 256 entries under-predicts kernel indirect branches |
 | RV32 6-stage model is not updated | Lacks cache model, CSR_File, MMU — suitable for bare-metal RV32 only |

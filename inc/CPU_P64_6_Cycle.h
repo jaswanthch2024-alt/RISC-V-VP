@@ -312,6 +312,18 @@ private:
     FunctionalUnitState dcache_miss_fu;// Variable-latency LSU (D$ miss deferred completion)
     FunctionalUnitState load_hit_fu;   // 1-cycle load-use stall (D$ hit / store-buf forward)
 
+    struct FetchQueueEntry {
+        uint64_t pc{0};
+        uint32_t instr{0};
+        bool is_compressed{false};
+        bool predicted_taken{false};
+        uint64_t predicted_target{0};
+        bool is_ras_call{false};
+        bool is_ras_return{false};
+    };
+    std::vector<FetchQueueEntry> fetch_queue;
+    static constexpr size_t FETCH_QUEUE_CAPACITY{4};
+
     // L1 cache instances (Phase 4).
     // I$: 16 KB, 4-way, 64 B lines — matches CVA6 cv64a6 default.
     // D$: 32 KB, 8-way, 64 B lines — matches CVA6 cv64a6 default.
