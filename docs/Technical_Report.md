@@ -125,7 +125,7 @@ Sizes match CVA6 cv64a6 default configuration.
 | Load (D$ hit) | 1 cycle + 1 stall | LB/LH/LW/LD |
 | Load (D$ miss) | 10 cycles | LB/LH/LW/LD |
 | MUL | 2 cycles | MUL/MULH/MULHU/MULHSU/MULW |
-| DIV | 64 cycles | DIV/DIVU/REM/REMU + W-variants |
+| DIV | 66 cycles (64-bit) / 34 cycles (32-bit) | DIV/DIVU/REM/REMU + W-variants |
 | FPU | 2–14 cycles | F/D extension ops |
 | CSR | 1 cycle (at commit) | CSRRW/CSRRS/CSRRC |
 
@@ -259,7 +259,7 @@ The VP produces IPC within **~10% of real CVA6** for average Linux integer workl
 |------------|--------|
 | No L2 cache | D$ misses cheaper than real HW; IPC slightly optimistic on memory-bound code |
 | Lockstep frontend stalls | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear backlogs, the lockstep frontend (Fetch/Decode/Issue) propagates stalls immediately rather than decoupling them via an instruction queue like the real CVA6. |
-| DIV always 64 cycles | Real CVA6 early-terminates for small operands (~20 cycles avg) |
+| Fixed DIV/DIVW latency | CVA6 divider latency is operand-size dependent (~66 cycles for 64-bit, ~34 cycles for 32-bit) |
 | Branch prediction accuracy 63.8% | Real CVA6 ~80–90% on Linux with larger BHT |
 | RV32 model not updated | RV32 6-stage lacks cache model, CSR_File, MMU — bare-metal only |
 | No write-combining buffer | Stores drain one at a time; real HW coalesces |

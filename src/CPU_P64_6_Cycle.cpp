@@ -81,6 +81,8 @@ void CPURV64P6_Cycle::cycle_thread() {
   // Reserve space for pipeline trace to avoid reallocations
   pipeline_trace.reserve(trace_limit);
 
+  bool prev_cycle_flush = false;
+
   // --- Main Simulation Loop ---
   while (true) {
     // WFI fast-forward: jump CLINT mtime to mtimecmp in one step,
@@ -133,47 +135,54 @@ void CPURV64P6_Cycle::cycle_thread() {
     // Move data from "Next" latches to "Current" latches to simulate clock edge
     // updates. When stall_ex is set (partial store-buffer overlap), keep ALL
     // latches unchanged so the load retries and upstream stages freeze.
-    // 1. Backend Transfer (EX Stage Latch)
-    if (!stall_ex) {
-      issue_ex_reg = issue_ex_next;
-    }
-
-    // 2. Midstage Transfer (Issue Stage Latch)
-    if (!stall_issue) {
-      id_issue_reg = id_issue_next;
-    }
-
-    // 3. Frontend Decoupled FIFO Transfer (Push to queue)
-    if (fetch_id_next.valid) {
-      if (fetch_queue.size() < FETCH_QUEUE_CAPACITY) {
-        fetch_queue.push_back({
-          fetch_id_next.pc,
-          fetch_id_next.instr,
-          fetch_id_next.is_compressed,
-          fetch_id_next.predicted_taken,
-          fetch_id_next.predicted_target,
-          fetch_id_next.is_ras_call,
-          fetch_id_next.is_ras_return
-        });
+    if (prev_cycle_flush) {
+      issue_ex_reg.valid = false;
+      id_issue_reg.valid = false;
+      fetch_id_reg.valid = false;
+      pcgen_fetch_reg.valid = false;
+    } else {
+      // 1. Backend Transfer (EX Stage Latch)
+      if (!stall_ex) {
+        issue_ex_reg = issue_ex_next;
       }
-      fetch_id_next.valid = false;
-    }
 
-    // 4. Decode Stage Latch Transfer (Pop from queue)
-    if (!stall_issue) {
-      if (!fetch_queue.empty()) {
-        auto entry = fetch_queue.front();
-        fetch_id_reg.pc = entry.pc;
-        fetch_id_reg.instr = entry.instr;
-        fetch_id_reg.is_compressed = entry.is_compressed;
-        fetch_id_reg.predicted_taken = entry.predicted_taken;
-        fetch_id_reg.predicted_target = entry.predicted_target;
-        fetch_id_reg.is_ras_call = entry.is_ras_call;
-        fetch_id_reg.is_ras_return = entry.is_ras_return;
-        fetch_id_reg.valid = true;
-        fetch_queue.erase(fetch_queue.begin());
-      } else {
-        fetch_id_reg.valid = false;
+      // 2. Midstage Transfer (Issue Stage Latch)
+      if (!stall_issue) {
+        id_issue_reg = id_issue_next;
+      }
+
+      // 3. Frontend Decoupled FIFO Transfer (Push to queue)
+      if (fetch_id_next.valid) {
+        if (fetch_queue.size() < FETCH_QUEUE_CAPACITY) {
+          fetch_queue.push_back({
+            fetch_id_next.pc,
+            fetch_id_next.instr,
+            fetch_id_next.is_compressed,
+            fetch_id_next.predicted_taken,
+            fetch_id_next.predicted_target,
+            fetch_id_next.is_ras_call,
+            fetch_id_next.is_ras_return
+          });
+        }
+        fetch_id_next.valid = false;
+      }
+
+      // 4. Decode Stage Latch Transfer (Pop from queue)
+      if (!stall_issue) {
+        if (!fetch_queue.empty()) {
+          auto entry = fetch_queue.front();
+          fetch_id_reg.pc = entry.pc;
+          fetch_id_reg.instr = entry.instr;
+          fetch_id_reg.is_compressed = entry.is_compressed;
+          fetch_id_reg.predicted_taken = entry.predicted_taken;
+          fetch_id_reg.predicted_target = entry.predicted_target;
+          fetch_id_reg.is_ras_call = entry.is_ras_call;
+          fetch_id_reg.is_ras_return = entry.is_ras_return;
+          fetch_id_reg.valid = true;
+          fetch_queue.erase(fetch_queue.begin());
+        } else {
+          fetch_id_reg.valid = false;
+        }
       }
     }
 
@@ -288,6 +297,8 @@ void CPURV64P6_Cycle::cycle_thread() {
       sc_core::sc_stop();
       break;
     }
+
+    prev_cycle_flush = this_cycle_flush;
   }
 }
 
@@ -1541,8 +1552,8 @@ void CPURV64P6_Cycle::EX_stage() {
           is_div_by_zero
               ? 1
               : (is_div_op
-                     ? 63
-                     : 1); // DIV=64 cycles, DIV-by-zero=1 cycle, MUL=2 cycles
+                     ? 65
+                     : 1); // DIV=66 cycles (64-bit serial), DIV-by-zero=1 cycle, MUL=2 cycles
       fu.result = mul_result;
       fu.trans_id = issue_ex_reg.rob_index;
       fu.rd = issue_ex_reg.rd;
@@ -1685,7 +1696,7 @@ void CPURV64P6_Cycle::EX_stage() {
       fw.busy = true;
       bool is_div_by_zero =
           is_div_w && (static_cast<uint32_t>(issue_ex_reg.rs2_val) == 0);
-      fw.remaining = is_div_by_zero ? 1 : (is_div_w ? 63 : 1);
+      fw.remaining = is_div_by_zero ? 1 : (is_div_w ? 33 : 1); // DIVW=34 cycles (32-bit serial), DIV-by-zero=1 cycle, MULW=2 cycles
       fw.result = static_cast<uint64_t>(w_result);
       fw.trans_id = issue_ex_reg.rob_index;
       fw.rd = issue_ex_reg.rd;
@@ -2600,9 +2611,21 @@ void CPURV64P6_Cycle::EX_stage() {
           pending_csr_write = {true, csr_addr};
         }
         result = old_val; // CSR rd gets previous value
-        // Changing satp (address space switch) invalidates all TLBs.
+        // Changing satp (address space switch) invalidates all TLBs and must
+        // serialise the pipeline.  Real CVA6 hardware flushes the pipeline on
+        // satp writes so that the Fetch stage never re-translates an already
+        // in-flight PC through the newly-active page tables.  Without this flush
+        // Fetch (which runs in the same sim-cycle as EX) would immediately try
+        // to translate a stale physical PC like 0x80201048 through the new sv39
+        // page tables, find no identity mapping, take an instruction page-fault,
+        // and redirect to stvec — hanging the simulator at early boot.
         if (csr_addr == CSR::SATP) {
           mmu->flush_all();
+          // Redirect to PC+4 through the new translation mode.
+          flush_pipeline = true;
+          pc_redirect_target =
+              issue_ex_reg.pc + (issue_ex_reg.is_compressed ? 2 : 4);
+          pc_redirect_valid = true;
         }
       }
     }

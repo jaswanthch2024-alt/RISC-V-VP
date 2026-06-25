@@ -7,7 +7,7 @@
     model = "riscv-vp,cva6-cycle6";
 
     chosen {
-        bootargs = "rdinit=/init rw console=ttyS0 earlycon=sbi keep_bootcon";
+        bootargs = "rdinit=/init rw console=ttyS0 earlycon=uart8250,mmio32,0x10000000 keep_bootcon";
         stdout-path = "/soc/uart@10000000:115200";
         linux,initrd-start = <0x0 0x84000000>;
         linux,initrd-end   = <0x0 0x8411dc59>;
