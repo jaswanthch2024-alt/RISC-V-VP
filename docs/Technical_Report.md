@@ -109,8 +109,8 @@ Mispredict penalty: **4–5 cycles** (full flush from EX stage).
 
 | Level | Size | Associativity | Line | Miss Penalty |
 |-------|------|--------------|------|-------------|
-| I$ | 16 KB | 4-way LRU | 64 B | 10 cycles |
-| D$ | 32 KB | 8-way LRU | 64 B | 10 cycles |
+| I$ | 16 KB | 4-way LRU | 64 B | 107 cycles |
+| D$ | 32 KB | 8-way LRU | 64 B | 107 cycles |
 | ITLB | 32 entries | Fully associative | — | 6 cycles (3-level PTW) |
 | DTLB | 32 entries | Fully associative | — | 6 cycles (3-level PTW) |
 | DRAM | 512 MB | Flat array | — | (no L2 modelled) |
@@ -123,7 +123,7 @@ Sizes match CVA6 cv64a6 default configuration.
 |------|---------|-------------|
 | ALU | 1 cycle | All integer ops |
 | Load (D$ hit) | 1 cycle + 1 stall | LB/LH/LW/LD |
-| Load (D$ miss) | 10 cycles | LB/LH/LW/LD |
+| Load (D$ miss) | 107 cycles | LB/LH/LW/LD |
 | MUL | 2 cycles | MUL/MULH/MULHU/MULHSU/MULW |
 | DIV | 66 cycles (64-bit) / 34 cycles (32-bit) | DIV/DIVU/REM/REMU + W-variants |
 | FPU | 2–14 cycles | F/D extension ops |
@@ -248,7 +248,7 @@ Full details in `docs/BUGS_AND_ISSUES.md`.
 | DRAM latency | **Not modelled** | ~100 cycles |
 
 The VP produces IPC within **~10% of real CVA6** for average Linux integer workloads. The two primary timing and microarchitectural calibration gaps are:
-1. **Absence of L2 Cache**: All D$ misses are handled at a flat 10-cycle penalty rather than hitting a real L2/DRAM hierarchy, which would lower real-hardware IPC on memory-bound workloads.
+1. **Absence of L2 Cache**: All D$ misses are handled at a flat 107-cycle penalty rather than hitting a real L2/DRAM hierarchy, which would lower real-hardware IPC on memory-bound workloads.
 2. **Lockstep Frontend Stalls**: Both the VP and the standard CVA6 are single-issue cores mathematically capped at a peak IPC of 1.0. However, the real CVA6 has a decoupled frontend, an instruction queue (FIFO), and independent execution pipelines. This allows it to fetch and decode instructions into a queue while the execution stage is stalled (e.g., on a cache miss), helping to smooth out pipeline bubbles. In contrast, the VP frontend operates in tighter lockstep, so any stall propagates upstream immediately, leading to slightly lower IPC under backpressure.
 
 ---

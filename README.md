@@ -138,8 +138,8 @@ Linux boot prediction accuracy: **63.7%** (kernel branches are difficult to pred
 
 | Level | Size | Config | Miss Penalty |
 |-------|------|--------|-------------|
-| I-cache | 16 KB | 4-way, 64 B lines, LRU | 10 cycles |
-| D-cache | 32 KB | 8-way, 64 B lines, LRU | 10 cycles |
+| I-cache | 16 KB | 4-way, 64 B lines, LRU | 107 cycles |
+| D-cache | 32 KB | 8-way, 64 B lines, LRU | 107 cycles |
 | ITLB | 32 entries | Fully associative | 6 cycles (3-level PTW) |
 | DTLB | 32 entries | Fully associative | 6 cycles (3-level PTW) |
 | DRAM | 512 MB | Flat array | — (no L2 modelled) |
@@ -152,7 +152,7 @@ Cache sizes match the CVA6 cv64a6 default configuration.
 |------|---------|-------------|
 | ALU | 1 cycle | All integer arithmetic/logic |
 | Load (D$ hit) | 1 cycle + 1 stall | LB / LH / LW / LD |
-| Load (D$ miss) | 10 cycles | LB / LH / LW / LD |
+| Load (D$ miss) | 107 cycles | LB / LH / LW / LD |
 | Store | 0 (buffered) | SB / SH / SW / SD |
 | MUL | 2 cycles | MUL / MULH / MULHU / MULHSU / MULW |
 | DIV | 66 cycles (64-bit) / 34 cycles (32-bit) | DIV / DIVU / REM / REMU + W-variants |
@@ -248,7 +248,7 @@ Co-sim = CVA6 Verilated RTL (`cv64a6_imafdc_sv39`, `NrCommitPorts=2`, matchlib N
 | IPC | **0.463** | **0.461** | **0.756** |
 | CPI | 2.16 | 2.17 | 1.32 |
 
-The co-sim IPC is approximately half the VP IPC for compute-bound benchmarks. The primary cause is real DRAM latency through the matchlib NoC interconnect: every D$ miss escalates to a multi-cycle bus transaction, whereas the VP uses a flat 10-cycle penalty. The co-sim also commits through the CVA6 RTL dual-commit path with realistic structural hazards.
+The co-sim IPC is approximately half the VP IPC for compute-bound benchmarks. The primary cause is real DRAM latency through the matchlib NoC interconnect: every D$ miss escalates to a multi-cycle bus transaction, whereas the VP uses a flat 107-cycle penalty. The co-sim also commits through the CVA6 RTL dual-commit path with realistic structural hazards.
 
 ### Dual Commit Behaviour
 
@@ -268,7 +268,7 @@ The VP commit stage implements a dual-commit loop (matching `NrCommitPorts=2` in
 
 ## Linux Boot Performance
 
-Measured at the point the BusyBox shell prompt (`~ #`) appears — boot-only, not including idle shell time. These results represent the VP model without realistic DRAM latency (using a flat 10-cycle cache miss penalty).
+Measured at the point the BusyBox shell prompt (`~ #`) appears — boot-only, not including idle shell time. These results represent the VP model with realistic DRAM latency (using a flat 107-cycle cache miss penalty).
 
 | Metric | Value |
 |--------|-------|
@@ -323,10 +323,10 @@ Linux boot IPC (0.230) is lower than bare-metal benchmarks (0.818–0.955) becau
 | Branch mispredict penalty | 4–5 cycles | 6 cycles |
 | sv39 MMU | Yes ✓ | Yes |
 | L2 cache | Not modelled | 256 KB unified (optional) |
-| DRAM latency | Not modelled (all misses = 10 cyc) | ~100 cycles |
+| DRAM latency | Flat penalty (107 cycles) | ~100 cycles |
 
 The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However, there are two primary timing and microarchitectural calibration gaps:
-1. **Absence of L2 Cache**: Real hardware would show lower IPC on memory-bound workloads as D$ misses escalate to L2/DRAM rather than resolving with a flat 10-cycle penalty.
+1. **Absence of L2 Cache**: Real hardware would show lower IPC on memory-bound workloads as D$ misses escalate to L2/DRAM rather than resolving with a flat 107-cycle penalty.
 2. **Lockstep Frontend Stalls**: Both the VP and the standard CVA6 are single-issue cores mathematically capped at a peak IPC of 1.0. However, the real CVA6 has a decoupled frontend, an instruction queue (FIFO), and independent execution pipelines. This allows it to fetch and decode instructions into a queue while the execution stage is stalled (e.g., on a cache miss), helping to smooth out pipeline bubbles. In contrast, the VP frontend operates in tighter lockstep, so any stall propagates upstream immediately, leading to slightly lower IPC under backpressure.
 
 ---
