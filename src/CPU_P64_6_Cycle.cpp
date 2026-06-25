@@ -1193,7 +1193,7 @@ void CPURV64P6_Cycle::Issue_stage() {
       (fu == FunctionalUnit::FPU && fpu_fu.busy) ||
       (fu == FunctionalUnit::LSU &&
        (id_issue_reg.opcode == 0x03 || id_issue_reg.opcode == 0x2F) &&
-       dcache_miss_fu.busy)) {
+       (dcache_miss_fu.busy || load_hit_fu.busy))) {
     stall_issue = true;
     stall_fetch = true;
     stall_pcgen = true;
@@ -1244,7 +1244,8 @@ void CPURV64P6_Cycle::Issue_stage() {
   // no ROB-head PC comparison, and no duplicate-allocation edge case.
   if (id_issue_reg.opcode == 0x73) {
     bool multi_cycle_in_flight =
-        dcache_miss_fu.busy || mul_fu.busy || div_fu.busy || fpu_fu.busy;
+        dcache_miss_fu.busy || mul_fu.busy || div_fu.busy || fpu_fu.busy ||
+        load_hit_fu.busy;
     if (multi_cycle_in_flight) {
       stall_issue = true;
       stall_fetch = true;
@@ -1914,11 +1915,13 @@ void CPURV64P6_Cycle::EX_stage() {
       }
       stats.load_store_forwards++;
       // load-use stall: configured by load_hit_penalty to represent AXI bus latency on hits.
-      load_hit_fu.busy = true;
-      load_hit_fu.remaining = load_hit_penalty;
-      load_hit_fu.result = fwd_result_val;
-      load_hit_fu.trans_id = issue_ex_reg.rob_index;
-      load_hit_fu.rd = issue_ex_reg.rd;
+      if (!load_hit_fu.busy) {
+        load_hit_fu.busy = true;
+        load_hit_fu.remaining = load_hit_penalty;
+        load_hit_fu.result = fwd_result_val;
+        load_hit_fu.trans_id = issue_ex_reg.rob_index;
+        load_hit_fu.rd = issue_ex_reg.rd;
+      }
       multi_cycle_dispatched = true;
     } else {
       // FwdResult::MISS — no overlapping stores in the buffer; safe to read
@@ -1966,11 +1969,13 @@ void CPURV64P6_Cycle::EX_stage() {
           multi_cycle_dispatched = true;
         } else {
           // D$ hit: result available next cycle — load-use stall configured by load_hit_penalty.
-          load_hit_fu.busy = true;
-          load_hit_fu.remaining = load_hit_penalty;
-          load_hit_fu.result = mem_result;
-          load_hit_fu.trans_id = issue_ex_reg.rob_index;
-          load_hit_fu.rd = issue_ex_reg.rd;
+          if (!load_hit_fu.busy) {
+            load_hit_fu.busy = true;
+            load_hit_fu.remaining = load_hit_penalty;
+            load_hit_fu.result = mem_result;
+            load_hit_fu.trans_id = issue_ex_reg.rob_index;
+            load_hit_fu.rd = issue_ex_reg.rd;
+          }
           multi_cycle_dispatched = true;
         }
       }
