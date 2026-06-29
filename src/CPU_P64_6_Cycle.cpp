@@ -975,7 +975,7 @@ void CPURV64P6_Cycle::ID_stage() {
     id_issue_next.rs1 = 0;
     id_issue_next.rs2 = 0;
   } else if (id_issue_next.opcode == 0x13 || id_issue_next.opcode == 0x1B ||
-             id_issue_next.opcode == 0x03 || id_issue_next.opcode == 0x67 ||
+             id_issue_next.opcode == 0x03 || id_issue_next.opcode == 0x07 || id_issue_next.opcode == 0x67 ||
              (id_issue_next.opcode == 0x73 &&
               !(((instr >> 25) & 0x7F) == 0x09 &&
                 ((instr >> 12) & 0x7) == 0))) {
@@ -986,7 +986,7 @@ void CPURV64P6_Cycle::ID_stage() {
 
   // Decode Destination Register (rd)
   // S-Type (Store) and B-Type (Branch) do not have a destination register.
-  if (id_issue_next.opcode == 0x23 || id_issue_next.opcode == 0x63) {
+  if (id_issue_next.opcode == 0x23 || id_issue_next.opcode == 0x27 || id_issue_next.opcode == 0x63) {
     id_issue_next.rd = 0;
   } else {
     id_issue_next.rd = (instr >> 7) & 0x1F;
@@ -1007,10 +1007,12 @@ void CPURV64P6_Cycle::ID_stage() {
   case 0x13: // I-type ALU
   case 0x1B: // I-type ALU-32 (ADDIW)
   case 0x03: // Load
+  case 0x07: // FP Load (FLW/FLD)
   case 0x67: // JALR
     id_issue_next.imm = static_cast<int64_t>(static_cast<int32_t>(instr) >> 20);
     break;
   case 0x23: // S-type
+  case 0x27: // FP Store (FSW/FSD)
     id_issue_next.imm = static_cast<int64_t>(
         static_cast<int32_t>(((instr >> 25) << 5) | ((instr >> 7) & 0x1F))
             << 20 >>
