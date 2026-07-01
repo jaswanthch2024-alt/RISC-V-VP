@@ -1589,7 +1589,7 @@ void CPURV64P6_Cycle::EX_stage() {
         if (div_res_zero || op_b_zero || op_b_neg_one) {
           div_cycles = 1;
         } else {
-          div_cycles = div_shift + 2;
+          div_cycles = div_shift + 6;
         }
       }
 
@@ -1769,7 +1769,7 @@ void CPURV64P6_Cycle::EX_stage() {
         if (div_res_zero || op_b_zero || op_b_neg_one) {
           div_cycles = 1;
         } else {
-          div_cycles = div_shift + 2;
+          div_cycles = div_shift + 6;
         }
       }
 

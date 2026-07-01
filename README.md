@@ -155,7 +155,7 @@ Cache sizes match the CVA6 cv64a6 default configuration.
 | Load (D$ miss) | 107 cycles | LB / LH / LW / LD |
 | Store | 0 (buffered) | SB / SH / SW / SD |
 | MUL | 2 cycles | MUL / MULH / MULHU / MULHSU / MULW |
-| DIV | 66 cycles (64-bit) / 34 cycles (32-bit) | DIV / DIVU / REM / REMU + W-variants |
+| DIV | Operand-dependent, ~2–66 cyc (64-bit) / ~2–34 cyc (32-bit) | DIV / DIVU / REM / REMU + W-variants; early-terminating serial divider (latency ∝ significant quotient bits, matches CVA6 to within ~0.6%) |
 | FPU | 2–14 cycles | F / D extension operations |
 | CSR | 1 cycle (at commit) | CSRRW / CSRRS / CSRRC / CSRRWI / … |
 
@@ -329,6 +329,20 @@ The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However,
 1. **Absence of L2 Cache**: Real hardware would show lower IPC on memory-bound workloads as D$ misses escalate to L2/DRAM rather than resolving with a flat 107-cycle penalty.
 2. **Lockstep Frontend Stalls**: Both the VP and the standard CVA6 are single-issue cores mathematically capped at a peak IPC of 1.0. However, the real CVA6 has a decoupled frontend, an instruction queue (FIFO), and independent execution pipelines. This allows it to fetch and decode instructions into a queue while the execution stage is stalled (e.g., on a cache miss), helping to smooth out pipeline bubbles. In contrast, the VP frontend operates in tighter lockstep, so any stall propagates upstream immediately, leading to slightly lower IPC under backpressure.
 
+#### Divider validation (vs CVA6 RTL co-simulation)
+
+A register-only 64-bit `div`/`rem` stress benchmark (20,000 divides) run on both the VP
+and the CVA6 RTL co-simulation, with bit-exact result agreement:
+
+| Divider model | Cycles | IPC | avg cyc/divide | Error vs CVA6 |
+|---------------|-------:|----:|---------------:|--------------:|
+| CVA6 RTL (reference) | 1,130,126 | 0.165 | ~47 | — |
+| VP — flat 66-cycle (old) | 1,483,431 | 0.126 | 65 | +31% |
+| **VP — operand-value early-termination (new)** | **1,123,900** | **0.166** | **47** | **−0.6%** |
+
+The operand-value-dependent divider cut the cycle error from **+31%** to **−0.6%**,
+making the divider the most closely-matched functional unit in the VP.
+
 ---
 
 ## Known Limitations
@@ -337,7 +351,6 @@ The VP is **within ~10% of real CVA6 IPC** for average Linux workloads. However,
 |------------|-------|
 | No L2 cache | D$ misses are cheaper than real HW; IPC slightly optimistic on memory-bound workloads |
 | Lockstep frontend stalls | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear backlogs, the lockstep frontend (Fetch/Decode/Issue) propagates stalls immediately rather than decoupling them via an instruction queue like the real CVA6. |
-| Fixed DIV/DIVW latency | CVA6 divider latency is operand-size dependent (~66 cycles for 64-bit, ~34 cycles for 32-bit) |
 | Branch prediction accuracy 63.7% on Linux | Real CVA6 ~80–90% with larger BHT; our gshare with 256 entries under-predicts kernel indirect branches |
 | RV32 6-stage model is not updated | Lacks cache model, CSR_File, MMU — suitable for bare-metal RV32 only |
 | No write-combining | Stores drain one at a time; real HW coalesces adjacent stores |
