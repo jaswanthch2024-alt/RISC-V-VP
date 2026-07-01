@@ -8,6 +8,18 @@ uint64_t global_cpu_cycle = 0;
 
 namespace riscv_tlm {
 
+static inline int clz64(uint64_t val) {
+  if (val == 0) return 64;
+  int n = 0;
+  if ((val & 0xFFFFFFFF00000000ULL) == 0) { n += 32; val <<= 32; }
+  if ((val & 0xFFFF000000000000ULL) == 0) { n += 16; val <<= 16; }
+  if ((val & 0xFF00000000000000ULL) == 0) { n += 8;  val <<= 8;  }
+  if ((val & 0xF000000000000000ULL) == 0) { n += 4;  val <<= 4;  }
+  if ((val & 0xC000000000000000ULL) == 0) { n += 2;  val <<= 2;  }
+  if ((val & 0x8000000000000000ULL) == 0) { n += 1;  val <<= 1;  }
+  return n;
+}
+
 CPURV64P6_Cycle::CPURV64P6_Cycle(sc_core::sc_module_name const &name,
                                  BaseType PC, bool debug)
     : CPU(name, debug) {
@@ -1549,13 +1561,39 @@ void CPURV64P6_Cycle::EX_stage() {
       bool is_div_op = (issue_ex_reg.funct3 >= 4);
       FunctionalUnitState &fu = is_div_op ? div_fu : mul_fu;
       fu.busy = true;
-      bool is_div_by_zero = is_div_op && (issue_ex_reg.rs2_val == 0);
-      fu.remaining =
-          is_div_by_zero
-              ? 1
-              : (is_div_op
-                     ? 65
-                     : 1); // DIV=66 cycles (64-bit serial), DIV-by-zero=1 cycle, MUL=2 cycles
+
+      int div_cycles = 1;
+      if (is_div_op) {
+        uint64_t A = issue_ex_reg.rs1_val;
+        uint64_t B = issue_ex_reg.rs2_val;
+        bool is_signed = (issue_ex_reg.funct3 == 4 || issue_ex_reg.funct3 == 6);
+        bool op_a_sign = is_signed && (static_cast<int64_t>(A) < 0);
+        bool op_b_sign = is_signed && (static_cast<int64_t>(B) < 0);
+
+        uint64_t lzc_a_input = op_a_sign ? (~A + 1) : A;
+        uint64_t lzc_b_input = op_b_sign ? ~B : B;
+
+        int lzc_a_result = clz64(lzc_a_input);
+        int lzc_b_result = clz64(lzc_b_input);
+
+        bool lzc_a_no_one = (lzc_a_input == 0);
+        bool lzc_b_no_one = (lzc_b_input == 0);
+
+        int shift_a = lzc_a_no_one ? 64 : lzc_a_result;
+        int div_shift = lzc_b_result - shift_a;
+
+        bool op_b_zero = lzc_b_no_one && !op_b_sign;
+        bool op_b_neg_one = lzc_b_no_one && op_b_sign;
+        bool div_res_zero = (div_shift < 0);
+
+        if (div_res_zero || op_b_zero || op_b_neg_one) {
+          div_cycles = 1;
+        } else {
+          div_cycles = div_shift + 2;
+        }
+      }
+
+      fu.remaining = is_div_op ? div_cycles : 1;
       fu.result = mul_result;
       fu.trans_id = issue_ex_reg.rob_index;
       fu.rd = issue_ex_reg.rd;
@@ -1696,9 +1734,46 @@ void CPURV64P6_Cycle::EX_stage() {
       bool is_div_w = (issue_ex_reg.funct3 >= 4);
       FunctionalUnitState &fw = is_div_w ? div_fu : mul_fu;
       fw.busy = true;
-      bool is_div_by_zero =
-          is_div_w && (static_cast<uint32_t>(issue_ex_reg.rs2_val) == 0);
-      fw.remaining = is_div_by_zero ? 1 : (is_div_w ? 33 : 1); // DIVW=34 cycles (32-bit serial), DIV-by-zero=1 cycle, MULW=2 cycles
+
+      int div_cycles = 1;
+      if (is_div_w) {
+        bool is_signed = (issue_ex_reg.funct3 == 4 || issue_ex_reg.funct3 == 6);
+        uint64_t A, B;
+        if (is_signed) {
+          A = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(issue_ex_reg.rs1_val)));
+          B = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(issue_ex_reg.rs2_val)));
+        } else {
+          A = static_cast<uint64_t>(static_cast<uint32_t>(issue_ex_reg.rs1_val));
+          B = static_cast<uint64_t>(static_cast<uint32_t>(issue_ex_reg.rs2_val));
+        }
+
+        bool op_a_sign = is_signed && (static_cast<int64_t>(A) < 0);
+        bool op_b_sign = is_signed && (static_cast<int64_t>(B) < 0);
+
+        uint64_t lzc_a_input = op_a_sign ? (~A + 1) : A;
+        uint64_t lzc_b_input = op_b_sign ? ~B : B;
+
+        int lzc_a_result = clz64(lzc_a_input);
+        int lzc_b_result = clz64(lzc_b_input);
+
+        bool lzc_a_no_one = (lzc_a_input == 0);
+        bool lzc_b_no_one = (lzc_b_input == 0);
+
+        int shift_a = lzc_a_no_one ? 64 : lzc_a_result;
+        int div_shift = lzc_b_result - shift_a;
+
+        bool op_b_zero = lzc_b_no_one && !op_b_sign;
+        bool op_b_neg_one = lzc_b_no_one && op_b_sign;
+        bool div_res_zero = (div_shift < 0);
+
+        if (div_res_zero || op_b_zero || op_b_neg_one) {
+          div_cycles = 1;
+        } else {
+          div_cycles = div_shift + 2;
+        }
+      }
+
+      fw.remaining = is_div_w ? div_cycles : 1;
       fw.result = static_cast<uint64_t>(w_result);
       fw.trans_id = issue_ex_reg.rob_index;
       fw.rd = issue_ex_reg.rd;
