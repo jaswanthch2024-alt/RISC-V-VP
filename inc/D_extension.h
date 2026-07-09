@@ -121,9 +121,9 @@ public:
                 latency = 1;
                 break;
             }
-            case OP_D_FADD_D: { regs->setF64(rd, regs->getF64(get_rs1()) + regs->getF64(get_rs2())); latency = 3; break; }
-            case OP_D_FSUB_D: { regs->setF64(rd, regs->getF64(get_rs1()) - regs->getF64(get_rs2())); latency = 3; break; }
-            case OP_D_FMUL_D: { regs->setF64(rd, regs->getF64(get_rs1()) * regs->getF64(get_rs2())); latency = 3; break; }
+            case OP_D_FADD_D: { regs->setF64(rd, regs->getF64(get_rs1()) + regs->getF64(get_rs2())); latency = 4; break; }
+            case OP_D_FSUB_D: { regs->setF64(rd, regs->getF64(get_rs1()) - regs->getF64(get_rs2())); latency = 4; break; }
+            case OP_D_FMUL_D: { regs->setF64(rd, regs->getF64(get_rs1()) * regs->getF64(get_rs2())); latency = 4; break; }
             case OP_D_FDIV_D: { regs->setF64(rd, regs->getF64(get_rs1()) / regs->getF64(get_rs2())); latency = 20; break; }
             case OP_D_FSQRT_D: { regs->setF64(rd, std::sqrt(regs->getF64(get_rs1()))); latency = 22; break; }
             case OP_D_FMADD_D: { regs->setF64(rd, std::fma(regs->getF64(get_rs1()), regs->getF64(get_rs2()), regs->getF64(get_rs3()))); latency = 5; break; }

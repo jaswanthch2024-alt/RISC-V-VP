@@ -327,6 +327,7 @@ void CPURV64P6_Cycle::PCGen_stage() {
     flush_pipeline = false;
     pc_redirect_valid = false;
     trap_pending = false; // Trap redirect consumed
+    taken_redirect_bubble = false; // flush supersedes any pending redirect bubble
     pcgen_fetch_next.valid = false;
     
     // Decoupled frontend: flush instruction fetch queue and pipeline stages
@@ -357,6 +358,16 @@ void CPURV64P6_Cycle::PCGen_stage() {
     // Keep current state (effectively repeating the same PC for next cycle if
     // we were outputting it) or just doing nothing creates a bubble if not
     // careful, but here 'next_pc' is persistent state.
+    return;
+  }
+
+  // Taken-branch redirect bubble: a correctly-predicted taken branch/jump costs
+  // one fetch cycle to steer the frontend to the target (CVA6 BTB redirect
+  // latency). Consume it here as a one-cycle bubble; next_pc already = target.
+  if (taken_redirect_bubble) {
+    taken_redirect_bubble = false;
+    pcgen_fetch_next.valid = false;
+    stats.stalls++;
     return;
   }
 
@@ -392,6 +403,7 @@ void CPURV64P6_Cycle::PCGen_stage() {
 
   if (predict_taken) {
     next_pc = pt_target;
+    taken_redirect_bubble = true; // charge 1 fetch bubble to redirect to target
   } else {
     next_pc = current_pc + 4; // Default increment
   }
@@ -1142,6 +1154,22 @@ void CPURV64P6_Cycle::Issue_stage() {
     }
   }
 
+  bool writes_to_int_reg = true;
+  if (fu == FunctionalUnit::FPU) {
+    writes_to_int_reg = false;
+    if (id_issue_reg.opcode == 0x53) {
+      uint32_t f7 = id_issue_reg.funct7;
+      if (f7 == 0x50 || f7 == 0x51 || f7 == 0x60 || f7 == 0x61 || f7 == 0x70 ||
+          f7 == 0x71) {
+        writes_to_int_reg = true;
+      }
+    }
+  }
+  bool writes_to_fp_reg = false;
+  if (fu == FunctionalUnit::FPU) {
+    writes_to_fp_reg = !writes_to_int_reg;
+  }
+
   // --- Operand resolution with scoreboard forwarding (CVA6 rd_clobber path)
   // --- For each source register: if rd_clobber says it is busy, check whether
   // the producing scoreboard entry is already ready (EX ran before Issue this
@@ -1233,6 +1261,37 @@ void CPURV64P6_Cycle::Issue_stage() {
     }
   }
 
+  // 1-cycle pipeline bubble/stall for shift-to-adder/branch/store dependency
+  // If the producer instruction currently in EX is a shift instruction, and the
+  // consumer in Issue stage reads the register written by it, we force a 1-cycle stall
+  // UNLESS the consumer is a fast logical instruction (AND/OR/XOR) which can be bypassed.
+  if (issue_ex_reg.valid) {
+    uint32_t ex_opcode = issue_ex_reg.instr & 0x7F;
+    uint32_t ex_funct3 = (issue_ex_reg.instr >> 12) & 0x7;
+    bool ex_is_shift = false;
+    if (ex_opcode == 0x33 || ex_opcode == 0x3B || ex_opcode == 0x13 || ex_opcode == 0x1B) {
+      if (ex_funct3 == 1 || ex_funct3 == 5) {
+        ex_is_shift = true;
+      }
+    }
+    if (ex_is_shift) {
+      uint8_t ex_rd = issue_ex_reg.rd;
+      if (ex_rd != 0) {
+        if ((id_issue_reg.rs1 == ex_rd && reads_rs1_as_int) ||
+            (id_issue_reg.rs2 == ex_rd && reads_rs2_as_int)) {
+          // Check if consumer is a logical instruction (XOR=4, OR=6, AND=7)
+          uint32_t op = id_issue_reg.opcode;
+          uint32_t f3 = id_issue_reg.funct3;
+          bool consumer_is_logical = (op == 0x33 || op == 0x3B || op == 0x13 || op == 0x1B) && 
+                                     (f3 == 4 || f3 == 6 || f3 == 7);
+          if (!consumer_is_logical) {
+            need_stall = true;
+          }
+        }
+      }
+    }
+  }
+
   // CSR RAW hazard: if previous instruction wrote a CSR that this one reads
   if (id_issue_reg.opcode == 0x73 && id_issue_reg.funct3 != 0) {
     uint16_t csr_addr = static_cast<uint16_t>(id_issue_reg.instr >> 20);
@@ -1264,7 +1323,7 @@ void CPURV64P6_Cycle::Issue_stage() {
   // AMOs (0x2F) also use the dcache_miss_fu for D$ miss latency.
   if ((fu == FunctionalUnit::MUL && mul_fu.busy) ||
       (fu == FunctionalUnit::DIV && div_fu.busy) ||
-      (fu == FunctionalUnit::FPU && fpu_fu.busy) ||
+      (fu == FunctionalUnit::FPU && (fpu_pipe_full() || fpu_divsqrt_fu.busy)) || // pipelined addmul; div/sqrt blocks
       (fu == FunctionalUnit::LSU &&
        (id_issue_reg.opcode == 0x03 || id_issue_reg.opcode == 0x2F) &&
        (dcache_miss_fu.busy || load_hit_fu.busy))) {
@@ -1312,7 +1371,7 @@ void CPURV64P6_Cycle::Issue_stage() {
   // no ROB-head PC comparison, and no duplicate-allocation edge case.
   if (id_issue_reg.opcode == 0x73) {
     bool multi_cycle_in_flight =
-        dcache_miss_fu.busy || mul_fu.busy || div_fu.busy || fpu_fu.busy ||
+        dcache_miss_fu.busy || mul_fu.busy || div_fu.busy || fpu_any_busy() ||
         load_hit_fu.busy;
     if (multi_cycle_in_flight) {
       stall_issue = true;
@@ -1371,8 +1430,10 @@ void CPURV64P6_Cycle::Issue_stage() {
     }
     scoreboard.flush();
     store_buffer.flush_speculative();
-    mul_fu.busy = div_fu.busy = fpu_fu.busy = dcache_miss_fu.busy =
+    mul_fu.busy = div_fu.busy = dcache_miss_fu.busy =
         load_hit_fu.busy = false;
+    for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
+  fpu_divsqrt_fu.busy = false;
     uint64_t tvec = csr.take_exception(CAUSE::ILLEGAL_INSTR, id_issue_reg.pc,
                                        id_issue_reg.instr);
     pc_redirect_target = tvec;
@@ -1404,24 +1465,6 @@ void CPURV64P6_Cycle::Issue_stage() {
   issue_ex_next.is_ras_call = id_issue_reg.is_ras_call;
   issue_ex_next.is_ras_return = id_issue_reg.is_ras_return;
 
-  // --- rd_clobber update ---
-  // Latest writer wins (handles WAW): update clobber to point to this entry.
-  // Commit_stage only clears clobber when trans_id still matches this entry.
-  bool writes_to_int_reg = true;
-  if (fu == FunctionalUnit::FPU) {
-    writes_to_int_reg = false;
-    if (id_issue_reg.opcode == 0x53) {
-      uint32_t f7 = id_issue_reg.funct7;
-      if (f7 == 0x50 || f7 == 0x51 || f7 == 0x60 || f7 == 0x61 || f7 == 0x70 ||
-          f7 == 0x71) {
-        writes_to_int_reg = true;
-      }
-    }
-  }
-  bool writes_to_fp_reg = false;
-  if (fu == FunctionalUnit::FPU) {
-    writes_to_fp_reg = !writes_to_int_reg;
-  }
   scoreboard[rob_idx].writes_to_fp_reg = writes_to_fp_reg;
 
   if (id_issue_reg.rd != 0 && writes_to_int_reg) {
@@ -1472,10 +1515,20 @@ void CPURV64P6_Cycle::EX_stage() {
       load_hit_fu.busy = false;
     }
   }
-  if (fpu_fu.busy) {
-    if (--fpu_fu.remaining == 0) {
-      scoreboard.complete(fpu_fu.trans_id, fpu_fu.result, fpu_fu.rd);
-      fpu_fu.busy = false;
+  // Pipelined FPU: tick every in-flight slot; each completes independently.
+  for (int fs = 0; fs < FPU_SLOTS; fs++) {
+    if (fpu_pipe[fs].busy) {
+      if (--fpu_pipe[fs].remaining == 0) {
+        scoreboard.complete(fpu_pipe[fs].trans_id, fpu_pipe[fs].result, fpu_pipe[fs].rd);
+        fpu_pipe[fs].busy = false;
+      }
+    }
+  }
+  // FP divide/sqrt: iterative, non-pipelined blocking unit.
+  if (fpu_divsqrt_fu.busy) {
+    if (--fpu_divsqrt_fu.remaining == 0) {
+      scoreboard.complete(fpu_divsqrt_fu.trans_id, fpu_divsqrt_fu.result, fpu_divsqrt_fu.rd);
+      fpu_divsqrt_fu.busy = false;
     }
   }
 
@@ -2485,7 +2538,8 @@ void CPURV64P6_Cycle::EX_stage() {
       };
       cancel_if_flushed(mul_fu);
       cancel_if_flushed(div_fu);
-      cancel_if_flushed(fpu_fu);
+      for (int fs = 0; fs < FPU_SLOTS; fs++) cancel_if_flushed(fpu_pipe[fs]);
+      cancel_if_flushed(fpu_divsqrt_fu);
       cancel_if_flushed(dcache_miss_fu);
       cancel_if_flushed(load_hit_fu);
     }
@@ -2922,12 +2976,23 @@ void CPURV64P6_Cycle::EX_stage() {
     if (latency <= 1) {
       // Single-cycle FPU ops (FMV, FCLASS, etc.): complete immediately.
       scoreboard.complete(issue_ex_reg.rob_index, fpu_result, issue_ex_reg.rd);
+    } else if (latency > 5) {
+      // FP divide/sqrt: iterative, non-pipelined — blocking unit (stalls issue).
+      fpu_divsqrt_fu.busy = true;
+      fpu_divsqrt_fu.remaining = latency - 1;
+      fpu_divsqrt_fu.result = fpu_result;
+      fpu_divsqrt_fu.trans_id = issue_ex_reg.rob_index;
+      fpu_divsqrt_fu.rd = issue_ex_reg.rd;
     } else {
-      fpu_fu.busy = true;
-      fpu_fu.remaining = latency - 1;
-      fpu_fu.result = fpu_result;
-      fpu_fu.trans_id = issue_ex_reg.rob_index;
-      fpu_fu.rd = issue_ex_reg.rd;
+      // Pipelined addmul/convert: place in a free slot (Issue stalls if all busy).
+      int slot = -1;
+      for (int fs = 0; fs < FPU_SLOTS; fs++) if (!fpu_pipe[fs].busy) { slot = fs; break; }
+      if (slot < 0) slot = 0; // fallback (should not happen: issue stalls when full)
+      fpu_pipe[slot].busy = true;
+      fpu_pipe[slot].remaining = latency - 1;
+      fpu_pipe[slot].result = fpu_result;
+      fpu_pipe[slot].trans_id = issue_ex_reg.rob_index;
+      fpu_pipe[slot].rd = issue_ex_reg.rd;
     }
     multi_cycle_dispatched = true;
   }
@@ -2975,8 +3040,10 @@ ex_done:
 
     scoreboard.flush();
     store_buffer.flush_speculative();
-    mul_fu.busy = div_fu.busy = fpu_fu.busy = dcache_miss_fu.busy =
+    mul_fu.busy = div_fu.busy = dcache_miss_fu.busy =
         load_hit_fu.busy = false;
+    for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
+  fpu_divsqrt_fu.busy = false;
     multi_cycle_dispatched = true;
     load_reservation_valid = false;
   }
@@ -3120,7 +3187,9 @@ bool CPURV64P6_Cycle::cpu_process_IRQ() {
 
   scoreboard.flush();
   store_buffer.flush_speculative();
-  mul_fu.busy = div_fu.busy = fpu_fu.busy = dcache_miss_fu.busy = false;
+  mul_fu.busy = div_fu.busy = dcache_miss_fu.busy = false;
+  for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
+  fpu_divsqrt_fu.busy = false;
   stall_ex = false; // Cancel any pending EX replay
 
   // Invalidate any outstanding LR reservation — per RISC-V spec, interrupts

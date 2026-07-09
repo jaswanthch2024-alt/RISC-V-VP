@@ -230,6 +230,12 @@ private:
     bool flush_pipeline{false};
     uint64_t pc_redirect_target{0};
     bool pc_redirect_valid{false};
+
+    // Taken-branch redirect bubble: a correctly-predicted TAKEN branch/jump
+    // costs one fetch cycle to steer the frontend to the target (matches CVA6's
+    // BTB redirect latency). Set when PCGen predicts taken; consumed as a bubble
+    // on the next PCGen cycle.
+    bool taken_redirect_bubble{false};
  
     // Scoreboard — unified issue FIFO + reorder buffer + rd_clobber (CVA6-aligned).
     // Replaces the separate bool scoreboard[32] and ReorderBuffer<32> rob.
@@ -308,7 +314,22 @@ private:
     };
     FunctionalUnitState mul_fu;        // 2-cycle multiplier   (MUL/MULH/MULHU/MULHSU/MULW)
     FunctionalUnitState div_fu;        // 64-cycle divider     (DIV/DIVU/REM/REMU/DIVW/…)
-    FunctionalUnitState fpu_fu;        // FPU functional unit (variable latency)
+    // Pipelined FPU (CVA6 FPnew-aligned): throughput 1 op/cycle, latency 2–5.
+    // Independent FP ops overlap; only dependent consumers stall via the
+    // scoreboard. Backed by a small array of in-flight result slots.
+    static constexpr int FPU_SLOTS = 8;
+    FunctionalUnitState fpu_pipe[FPU_SLOTS];
+    bool fpu_pipe_full() const {
+        for (int i = 0; i < FPU_SLOTS; i++) if (!fpu_pipe[i].busy) return false;
+        return true;
+    }
+    bool fpu_any_busy() const {
+        for (int i = 0; i < FPU_SLOTS; i++) if (fpu_pipe[i].busy) return true;
+        return fpu_divsqrt_fu.busy;
+    }
+    // FP divide/sqrt: iterative, NON-pipelined (like CVA6 FPnew's DIVSQRT block).
+    // Blocking single unit — a second FP div/sqrt waits for the first.
+    FunctionalUnitState fpu_divsqrt_fu;
     FunctionalUnitState dcache_miss_fu;// Variable-latency LSU (D$ miss deferred completion)
     FunctionalUnitState load_hit_fu;   // 1-cycle load-use stall (D$ hit / store-buf forward)
 
@@ -334,8 +355,8 @@ private:
     int icache_miss_penalty{107};  // Settable before sc_start()
     int dcache_miss_penalty{107};  // Settable before sc_start()
     int store_drain_remaining{0};  // Active write-through store cycles remaining
-    int store_write_penalty{20};   // DRAM write-through latency penalty
-    int load_hit_penalty{5};       // AXI bus latency on hits (load-use stall)
+    int store_write_penalty{0};   // 0-cycle write-back store drain latency
+    int load_hit_penalty{1};       // 1-cycle load-use stall on hits (L1 D$ latency)
 
     // CSR file — M+S+U privilege support (Phase 5/6/7).
     CSR_File csr;

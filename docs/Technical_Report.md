@@ -70,9 +70,13 @@ fw_jump.bin (OpenSBI M-mode)
 ### 3.1 Pipeline Stages
 
 ```
-PCGen → Fetch → Decode → Issue → EX/MEM → Commit
-  1        2       3       4        5         6
+PCGen → Fetch →[instr queue]→ Decode → Issue → EX/MEM → Commit
+  1        2        (4 deep)      3        4        5         6
 ```
+
+The frontend is **decoupled** from the backend by a 4-entry instruction queue
+(`fetch_queue`, matching CVA6's instruction-queue depth). Fetch continues to run
+ahead while the backend stalls; PCGen and Fetch stall only when the queue fills.
 
 | Stage | Function |
 |-------|----------|
@@ -92,8 +96,25 @@ PCGen → Fetch → Decode → Issue → EX/MEM → Commit
 | Load-use (D$ miss) | `dcache_miss_fu` defers for `dcache_miss_penalty` cycles |
 | Store-buffer partial overlap | Tri-state `FwdResult` (HIT/PARTIAL_OVERLAP/MISS); stall on overlap |
 | Structural (MUL/DIV/FPU) | Issue stalls when FU is occupied |
+| Shift → arithmetic RAW | 1-cycle bubble in Issue (see 3.2.1) |
 | Branch misprediction | Full pipeline flush + redirect from EX stage |
 | CSR RAW | Serialization stall in Issue |
+
+#### 3.2.1 Back-to-back shift→adder dependency bubble
+
+CVA6 cannot forward the result of a **shift** (`SLL/SRL/SRA` and their `I`/`W`
+variants) to the immediately following consumer without a one-cycle bubble, unless
+that consumer is a fast logical op (`AND/OR/XOR`). The VP reproduces this in
+`Issue_stage`: if the instruction currently in EX is a shift and the instruction in
+Issue reads its `rd` as an integer source, Issue stalls one cycle.
+
+This is worth **~0.19 cycles per instruction** on dense unrolled ALU code and was
+the single largest remaining integer-timing error. It was isolated with a
+discriminating experiment: two branch-free, identically-sized unrolled kernels, one
+with back-to-back dependencies (`int_nobranch`) and one with the same ops but
+dependencies spaced 8 apart (`int_indep`). CVA6's CPI fell from **1.200 to 1.002**
+between them — proving a dependency bubble rather than a fetch-bandwidth limit, and
+pinning the cost at exactly **1.00 cycle per dependent pair**. See `BUGS.md` §B4.
 
 ### 3.3 Branch Prediction
 
@@ -126,8 +147,10 @@ Sizes match CVA6 cv64a6 default configuration.
 | Load (D$ miss) | 107 cycles | LB/LH/LW/LD |
 | MUL | 2 cycles | MUL/MULH/MULHU/MULHSU/MULW |
 | DIV | Operand-dependent, ~2–66 cyc (64-bit) / ~2–34 cyc (32-bit) | DIV/DIVU/REM/REMU + W-variants; early-terminating serial divider |
-| FPU | 2–14 cycles | F/D extension ops |
+| FPU add/mul/cvt | 2–5 cycles, **pipelined** (throughput 1/cycle) | FADD/FSUB/FMUL/FMADD/FCVT/FSGNJ/FCMP |
+| FPU div/sqrt | ~10–22 cycles, **non-pipelined** (blocking) | FDIV/FSQRT |
 | CSR | 1 cycle (at commit) | CSRRW/CSRRS/CSRRC |
+| Taken branch | +1 fetch bubble | correctly-predicted taken branch/jump (BTB redirect) |
 
 #### Divider — operand-value-dependent early termination
 
@@ -147,6 +170,37 @@ operands finish early exactly as on hardware. On a register-only 64-bit div/rem
 stress benchmark this tracks the CVA6 RTL co-simulation to **within 0.6%**
 (47 vs ~47 cycles/divide average), versus **+31%** for the previous flat 66-cycle
 model.
+
+#### Taken-branch redirect bubble
+
+A correctly-predicted **taken** branch or jump costs one fetch cycle on CVA6: the
+frontend needs a cycle to steer fetch to the BTB-predicted target. PCGen models
+this with a one-cycle bubble injected after every predicted-taken control transfer
+(`taken_redirect_bubble`, cleared on flush so it never double-counts a
+misprediction). Not-taken branches are free. This closed the integer-ALU gap on a
+tight register-only loop from **+9%** (VP IPC 1.000 vs CVA6 0.917) to **−0.1%**,
+and — being a *frontend* cost — is correctly hidden behind backend stalls on
+load-/divide-/FP-bound code (no effect there).
+
+#### Pipelined FPU (FPnew-aligned)
+
+CVA6's FPnew has a **pipelined** ADDMUL block (throughput 1 op/cycle, latency
+2–5) and a separate **iterative, non-pipelined** DIVSQRT block. The VP mirrors
+this:
+
+- **Add/mul/convert** (`fadd`, `fsub`, `fmul`, `fmadd`, `fcvt`, `fsgnj`, `fcmp`)
+  execute in an **8-slot pipelined unit** (`fpu_pipe[]`): a new FP op issues every
+  cycle; only *dependent* consumers stall (via the scoreboard). Double-precision
+  add/mul latency is **4** cycles.
+- **Divide/square-root** (`fdiv`, `fsqrt`) run in a **blocking** unit
+  (`fpu_divsqrt_fu`): iterative, one at a time, ~10–22 cycles.
+
+This replaced the previous single blocking FPU (which serialised *all* FP ops).
+On register-only FP benchmarks it tracks CVA6 to **+3.6%** (add/mul, `fp_bench`
+IPC 0.518 vs 0.500) and **+4.8%** (add/mul/div/sqrt, `fp_stress` 0.152 vs 0.145),
+with bit-exact numerical results — versus **−21%** for the old blocking model.
+(Pipelining div/sqrt as well is *wrong* — it over-speeds `fp_stress` to 0.250;
+the ADDMUL/DIVSQRT split is essential.)
 
 ### 3.6 Store Buffer
 
@@ -264,11 +318,52 @@ Full details in `docs/BUGS_AND_ISSUES.md`.
 | MUL latency | 2 cycles ✓ | 2 cycles |
 | sv39 MMU | Yes ✓ | Yes |
 | L2 cache | **Not modelled** | 256 KB (optional) |
-| DRAM latency | **Not modelled** | ~100 cycles |
+| DRAM latency | Flat 107-cycle miss penalty | ~100 cycles |
 
-The VP produces IPC within **~10% of real CVA6** for average Linux integer workloads. The two primary timing and microarchitectural calibration gaps are:
-1. **Absence of L2 Cache**: All D$ misses are handled at a flat 107-cycle penalty rather than hitting a real L2/DRAM hierarchy, which would lower real-hardware IPC on memory-bound workloads.
-2. **Lockstep Frontend Stalls**: Both the VP and the standard CVA6 are single-issue cores mathematically capped at a peak IPC of 1.0. However, the real CVA6 has a decoupled frontend, an instruction queue (FIFO), and independent execution pipelines. This allows it to fetch and decode instructions into a queue while the execution stage is stalled (e.g., on a cache miss), helping to smooth out pipeline bubbles. In contrast, the VP frontend operates in tighter lockstep, so any stall propagates upstream immediately, leading to slightly lower IPC under backpressure.
+> **Note on the co-sim's memory.** The Verilated CVA6 harness has **no main-memory
+> timing model**: the instance named `dram` (`cva6_matchlib_system.h:41`) is a
+> matchlib testbench `SlaveFromFile`, backed by a `std::map` with zero wait states.
+> It is neither DRAM nor a real SRAM macro — it is an idealized zero-latency stub.
+> (The `tc_sram_wrapper` modules are CVA6's internal L1 cache tag/data arrays, not
+> memory.) All VP-vs-CVA6 agreement on memory-touching benchmarks is therefore
+> agreement **with the harness**, not a prediction of silicon behaviour.
+
+**Per-unit validation (register-only microbenchmarks, both bit-exact vs CVA6 — see `BUGS.md`):**
+
+| Unit | Benchmark | CVA6 IPC | VP IPC | Error |
+|------|-----------|---------:|-------:|------:|
+| Integer ALU (looped) | int_alu | 0.917 | 0.916 | −0.0% |
+| Integer ALU (dependency chain, branch-free) | int_nobranch | 0.833 | 0.831 | −0.2% |
+| Integer ALU (independent ops, branch-free) | int_indep | 0.998 | 0.996 | −0.2% |
+| Integer divide | div_stress | 0.165 | 0.166 | +0.3% |
+| FP add/mul | fp_bench | 0.500 | 0.518 | +3.6% |
+| FP add/mul/div/sqrt | fp_stress | 0.145 | 0.153 | +5.1% |
+| Load/store + MUL | long_test3 | 0.727 | 0.727 | −0.0% |
+| Branch mispredict recovery | robust_stress | 0.685 | 0.704 | **+2.8%** |
+
+After calibrating the divider (operand-value early termination), the taken-branch
+bubble, the pipelined FPU, the shift→adder dependency bubble, and the memory
+penalties, **five of the eight benchmarks agree with the RTL to within 0.3%**, and
+the worst case is +5.1%. Two gaps remain:
+
+1. **Memory latency is calibrated to the co-sim, not to silicon.**
+   `load_hit_penalty = 1` and `store_write_penalty = 0` reproduce the co-sim
+   exactly (long_test3 matches to 3 decimal places) because the co-sim's memory is
+   a zero-wait-state `SlaveFromFile`. They are **optimistic for a real SoC** with
+   DRAM behind AXI, and must be re-derived if a timed memory model is introduced.
+   See `BUGS.md` §B5.
+2. **Branch-mispredict flush penalty is one cycle too cheap.** On robust_stress the
+   VP runs *faster* than the RTL (0.704 vs 0.685, **+2.8%**). The HPM counters
+   isolate the cause: mispredict **counts** agree (VP 125,500 vs CVA6 125,498), so
+   the predictor's accuracy is right, while the 125,221-cycle shortfall divided by
+   125,498 mispredicts gives **0.998 cycles per mispredict** — exactly one missing
+   bubble on the flush path. This matches the table above independently: the VP's
+   mispredict penalty is 4–5 cycles where CVA6's is 6. Fix is the same shape as the
+   taken-branch bubble (§3.5). See `BUGS.md` §B6. **Not yet implemented.**
+
+   *(An earlier revision of this report blamed a "lockstep frontend". That was wrong
+   twice over — the VP does model CVA6's 4-entry instruction queue (§3.1), and a
+   missing queue would make the VP pessimistic, not optimistic. Retracted.)*
 
 ---
 
@@ -277,7 +372,7 @@ The VP produces IPC within **~10% of real CVA6** for average Linux integer workl
 | Limitation | Impact |
 |------------|--------|
 | No L2 cache | D$ misses cheaper than real HW; IPC slightly optimistic on memory-bound code |
-| Lockstep frontend stalls | Average IPC is capped at 1.0. While the commit stage has 2 ports to clear backlogs, the lockstep frontend (Fetch/Decode/Issue) propagates stalls immediately rather than decoupling them via an instruction queue like the real CVA6. |
+| Single-issue backend | Average IPC is capped at 1.0. The commit stage has 2 ports to clear backlogs, and the frontend is decoupled via a 4-entry instruction queue (§3.1), but Issue retires at most one instruction per cycle. |
 | Branch prediction accuracy 63.8% | Real CVA6 ~80–90% on Linux with larger BHT |
 | RV32 model not updated | RV32 6-stage lacks cache model, CSR_File, MMU — bare-metal only |
 | No write-combining buffer | Stores drain one at a time; real HW coalesces |

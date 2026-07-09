@@ -87,17 +87,112 @@ verified).
   div/sqrt (`fp_stress` 0.250 vs 0.145). Splitting ADDMUL (pipelined) from DIVSQRT
   (blocking) is essential.
 
-### B4. Load-use stall over-charge *(IDENTIFIED — calibration, not yet modelled)*
+### B4. Shift→adder dependency bubble missing *(FIXED)*
+- **Symptom:** on a *branch-free*, fully-unrolled ALU dependency chain
+  (`int_nobranch`), the VP ran at IPC **0.996** while CVA6 was **0.833** — a
+  **+19.5%** error. Not explained by branches (1 mispredict), I$ misses (324, all
+  cold), or memory (D$ = 0/0). ~478,000 cycles (**0.19 cyc/instr**) unaccounted.
+- **Diagnosis — the discriminating experiment.** Two hypotheses fit the number
+  equally well: (H1) a back-to-back dependency bubble, or (H2) a fetch-bandwidth /
+  I$ line-crossing limit. A control benchmark `int_indep` was built with **identical
+  straight-line structure and code size** but the dependencies **spaced 8 apart**
+  (8 interleaved independent variables). Result:
+
+  | Benchmark | deps | CVA6 CPI | VP CPI | verdict |
+  |---|---|---:|---:|---|
+  | `int_nobranch` | back-to-back | **1.200** | 1.00 | gap present |
+  | `int_indep` | spaced out | **1.002** | 1.00 | gap gone |
+
+  CVA6's CPI collapsed to 1.002 with the *same fetch pattern* → **H1 confirmed,
+  H2 refuted.** Penalty quantified: 514,345 extra cycles ÷ 513,207 dependent pairs
+  = **1.002 cycles per dependent pair — exactly one.**
+- **Root cause:** in the `-O1` unrolled body, `d = d + (a << 3)` compiles to
+  `slli t,a,3` immediately followed by the dependent `add d,d,t`. Real CVA6 cannot
+  forward a **shift** result to the very next arithmetic/branch/store consumer
+  without one bubble; the VP forwarded it for free.
+- **Fix:** in `Issue_stage`, when the instruction in EX is a **shift**
+  (`SLL/SRL/SRA` + I/W variants) and the instruction in Issue reads its `rd`,
+  insert a 1-cycle stall — **unless** the consumer is a fast logical op
+  (`AND/OR/XOR`), which CVA6 can bypass.
+- **Result:** `int_nobranch` **0.996 → 0.831** (CVA6 0.833, **−0.2%**), with **no
+  regression** on the controls (`int_indep` 0.996 vs 0.998; `int_alu` 0.916 vs
+  0.917). Results bit-exact.
+- **Why it hid for so long:** in a *small* loop GCC schedules the shift away from
+  its consumer, so the penalty rarely fires — the looped `int_alu` test agreed
+  (0.916 vs 0.917) partly by coincidence. Only the fully-unrolled, branch-free
+  variant exposed it. **Lesson: build a branch-free control for every unit.**
+
+### B5. Load-use stall over-charge *(FIXED)*
 - **Symptom:** `long_test3` (load-heavy `-O1`) cycles **+100%** / IPC **−50%**
   (VP 0.364 vs CVA6 0.727).
-- **Root cause:** `load_hit_penalty = 5` is charged as a **structural stall on
-  every load** (arms `load_hit_fu`; Issue stalls while busy), regardless of whether
-  the next instruction uses the result. Real CVA6 only stalls a *dependent*
-  consumer and hides load latency behind independent work. Confirmed by the stall
-  breakdown: 1.5M load-use stalls vs CVA6's ~199K total bubbles.
-- **Proposed fix (same shape as B3):** model load latency as a **scoreboard
-  dependency** (stall only the dependent consumer) instead of a blanket Issue
-  stall, and/or lower `load_hit_penalty` to ~1–2.
+- **Root cause:** two memory penalties were set to model *off-chip AXI/DRAM*
+  latency, but the co-sim models **no main memory latency whatsoever** — its
+  `dram` instance is a zero-wait-state behavioural `SlaveFromFile` (see §C) — and
+  CVA6's L1 D$ hit latency is a single cycle:
+  - `load_hit_penalty = 5` — charged as a **structural stall on every load** (arms
+    `load_hit_fu`; Issue stalls while busy), regardless of whether the next
+    instruction uses the result.
+  - `store_write_penalty = 20` — write-through drain latency per store.
+- **Fix:** `load_hit_penalty` **5 → 1** (L1 D$ hit latency) and
+  `store_write_penalty` **20 → 0** (`CPU_P64_6_Cycle.h:358-359`).
+- **Result:** `long_test3` VP **0.364 → 0.727** vs CVA6 **0.727** — an **exact
+  match** (800,056 instr / 1,100,602 cycles). Stall breakdown now shows 299,999
+  load-use stalls at 1 cycle each, and stores drain in-line.
+- **⚠ Caveat — this calibrates to a testbench stub, not to silicon.**
+  `store_write_penalty = 0` and `load_hit_penalty = 1` are correct *against the CVA6
+  co-sim harness*, whose "memory" is a zero-wait-state `std::map` with no timing
+  model (§C). On a real SoC with DRAM behind AXI, both are badly optimistic. The
+  perfect long_test3 agreement (0.727 vs 0.727) therefore demonstrates that **the VP
+  matches the RTL harness**, not that it predicts silicon performance. If
+  `SlaveFromFile` is ever replaced with a timed memory model, **these two constants
+  must be re-derived**; they no longer represent any physical latency.
+- **Note on the original diagnosis:** the "blanket structural stall vs scoreboard
+  dependency" analysis above is still *architecturally* accurate — `load_hit_fu` is
+  a single blocking slot, so two independent loads cannot overlap. It simply stopped
+  being *observable* once the penalty dropped to 1 cycle, because a 1-cycle blocking
+  unit and a 1-cycle scoreboard dependency are indistinguishable in cycle count.
+  A workload with two independent loads and enough independent work between them
+  would still expose it. Not worth fixing until such a workload matters.
+
+### B6. Branch-misprediction flush penalty one cycle too cheap *(IDENTIFIED — not yet fixed)*
+- **Symptom:** `robust_stress` (branch-heavy: multiply-accumulate driven by an LCG
+  random number generator, deliberately unpredictable) — VP IPC **0.704** vs CVA6
+  **0.685**, i.e. the VP is **+2.8% optimistic** (it runs *faster* than the RTL).
+- **Diagnosis — the counters isolate it exactly.** No new benchmark was needed; the
+  existing HPM counters separate *rate* from *penalty*:
+
+  | Quantity | CVA6 | VP |
+  |---|---:|---:|
+  | Instructions retired | 3,127,046 | 3,127,063 |
+  | Cycles | 4,567,925 | 4,442,704 |
+  | Branch mispredicts (HPM4) | 125,498 | 125,500 |
+
+  Mispredict **counts agree to 2 parts in 125,000** → the branch predictor's
+  *accuracy* is modelled correctly, so the gap is not a prediction-rate error.
+  The cycle shortfall is `4,567,925 − 4,442,704 = 125,221`, and
+
+  > **125,221 missing cycles ÷ 125,498 mispredicts = 0.998 cycles per mispredict**
+
+  — **exactly one cycle.** The VP's misprediction recovery is one cycle shorter
+  than CVA6's. This accounts for **100%** of the residual.
+- **Root cause (proposed):** the VP flushes and redirects from EX in one cycle
+  (`flush_pipeline` → `prev_cycle_flush` → refetch). Real CVA6 takes one additional
+  cycle to steer the frontend after the flush — the same frontend-redirect latency
+  already modelled for *correctly-predicted taken* branches (§B2), which was never
+  applied on the mispredict path.
+- **Proposed fix:** charge one extra bubble on flush, in the same place §B2's
+  `taken_redirect_bubble` is consumed in `PCGen_stage`. Expected effect:
+  robust_stress 0.704 → ~0.685. Must be validated against the controls — the
+  arithmetic benchmarks have 3–5 mispredicts each, so they should not move.
+- **⚠ Not yet implemented or measured.** The `0.998 cyc/mispredict` figure is an
+  arithmetic decomposition of *one* benchmark, not a discriminating experiment. It
+  is consistent with a 1-cycle flush penalty, but `robust_stress` also contains
+  loads/stores and 500,500 branches, so a confound (e.g. a taken-branch bubble
+  interacting with flushes) is not excluded. The honest test is to implement the
+  bubble and confirm (a) robust_stress lands on 0.685 and (b) all seven other
+  benchmarks stay put.
+- **Supersedes the retracted "lockstep frontend" explanation** (see §D), which was
+  wrong on both mechanism and sign.
 
 ---
 
@@ -113,26 +208,93 @@ verified).
   count fetch/port *activity* (speculative, multi-port OR), so they exceed retired
   instructions and differ from the VP's exact software counters. Compare **miss
   counts** and **loads/stores**, not the "access" denominators.
-- **CVA6 "dram" is a behavioural `SlaveFromFile` (a `std::map`), zero-wait-state /
-  SRAM-speed — no DRAM latency modelled.** So co-sim cache misses are cheap; the VP
-  instead uses a flat 107-cycle miss penalty.
+- **The co-sim has no main-memory model at all — despite the name `dram`.** The
+  instance at `0x80000000–0x8FFFFFFF` (`cva6_matchlib_system.h:41,87`) is a
+  `SlaveFromFile<axi::cfg::standard>`, a matchlib **testbench** class whose storage
+  is a `std::map<Addr,Data>` (`axi/testbench/SlaveFromFile.h:65`). It has **no
+  latency, wait-state or delay parameter**; its only `wait()` calls are AXI
+  handshake ticks. From the core it behaves as an idealized zero-wait-state SRAM.
+  It is **not DRAM**, and the variable name is misleading.
+  - Do not confuse this with the `tc_sram_wrapper` modules seen when grepping for
+    "sram" — those are the tag/data arrays **inside** CVA6's L1 I$/D$, not memory.
+  - Consequence: co-sim cache misses are nearly free. The VP by contrast applies a
+    flat 107-cycle miss penalty (`icache/dcache_miss_penalty`), which is why the VP
+    is *pessimistic* on miss-heavy code — and why §B5's memory constants are fitted
+    to a testbench stub rather than to hardware.
 - **Branch counts differ by definition** (CVA6 counts jumps/calls/returns as
   branches; the VP does not) — compare mispredict *rate*, not raw counts.
 
 ---
 
-## D. Accuracy summary (register-only microbenchmarks, both bit-exact)
+## D. Accuracy summary
 
-| Unit tested | Benchmark | CVA6 IPC | VP IPC | Error | Status |
+All rows below were re-measured in a single session against the **same `-O1` ELFs**
+on both simulators. Instruction counts differ by a constant 17–20 (readout epilogue,
+see §C).
+
+| Unit tested | Benchmark | CVA6 IPC | VP IPC | IPC err | Status |
 |---|---|---:|---:|---:|---|
-| Integer ALU | int_alu | 0.917 | 0.916 | −0.1% | ✅ B2 |
-| Integer divide | div_stress | 0.165 | 0.166 | +0.6% | ✅ B1 |
+| Integer ALU (looped) | int_alu | 0.917 | 0.916 | −0.0% | ✅ B2 |
+| Integer ALU (dependency chain, branch-free) | int_nobranch | 0.833 | 0.831 | −0.2% | ✅ B4 |
+| Integer ALU (independent ops, branch-free) | int_indep | 0.998 | 0.996 | −0.2% | ✅ control |
+| Integer divide | div_stress | 0.165 | 0.166 | +0.3% | ✅ B1 |
+| Load/store + MUL | long_test3 | 0.727 | 0.727 | −0.0% | ✅ B5 |
+| Branch mispredict recovery | robust_stress | 0.685 | 0.704 | **+2.8%** | ⚠ **B6 open** |
 | FP add/mul | fp_bench | 0.500 | 0.518 | +3.6% | ✅ B3 |
-| FP add/mul/div/sqrt | fp_stress | 0.145 | 0.152 | +4.8% | ✅ B3 |
+| FP add/mul/div/sqrt | fp_stress | 0.145 | 0.153 | +5.1% | ✅ B3 |
+
+**Five of eight benchmarks agree with the RTL to within 0.3%; the worst is +5.1%.**
+
+The three residuals are each understood:
+- **robust_stress (+2.8%)** — one missing bubble on mispredict recovery (§B6),
+  quantified at 0.998 cyc/mispredict. Not yet fixed.
+- **fp_bench (+3.6%), fp_stress (+5.1%)** — the FPnew latency model is approximate
+  (ADDMUL depth 4, DIV 20, SQRT 22 are fitted, not derived from the RTL). No
+  isolated per-FP-op latency experiment has been run.
+
+### Raw cycle/instruction data (for reproduction)
+| Benchmark | CVA6 instr | CVA6 cycles | VP instr | VP cycles |
+|---|---:|---:|---:|---:|
+| int_alu | 2,200,041 | 2,400,417 | 2,200,061 | 2,400,714 |
+| int_nobranch | 2,566,039 | 3,080,384 | 2,566,059 | 3,086,804 |
+| int_indep | 2,245,043 | 2,249,473 | 2,245,066 | 2,254,211 |
+| div_stress | 186,659 | 1,130,126 | 186,678 | 1,126,502 |
+| long_test3 | 800,038 | 1,100,413 | 800,056 | 1,100,602 |
+| robust_stress | 3,127,046 | 4,567,925 | 3,127,063 | 4,442,704 |
+| fp_bench | 1,300,059 | 2,600,478 | 1,300,077 | 2,510,107 |
+| fp_stress | 900,047 | 6,200,440 | 900,065 | 5,900,516 |
+
+### Benchmark design notes
+- `int_nobranch` / `int_indep` are **1024×-unrolled** so the loop branch is <0.1% of
+  instructions, while the ~4–5 KB code footprint stays inside the 16 KB I-cache
+  (I$ misses ≈ code_bytes ÷ line_size: CVA6 324×16 B ≈ VP 85×64 B ≈ 5.3 KB ✓ — an
+  independent confirmation that both cache models are correct).
+- `div_stress` still contains one data-dependent branch (`if (a<0) a = -a;`),
+  producing ~4,000 mispredicts. Harmless (division dominates ~83% of cycles; VP
+  3,999 vs CVA6 3,995) but it is the one impurity in the arithmetic set.
 
 ### Remaining known gaps
 | Workload | CVA6 | VP | Error | Cause |
 |---|---:|---:|---:|---|
-| Load-heavy (long_test3 -O1) | 0.727 | 0.364 | −50% | load-use over-charge (B4, open) |
-| Branch-heavy (robust_stress) | 0.685 | 0.793 | +16% | single-issue frontend cap |
+| Branch-heavy (robust_stress) | 0.685 | 0.793 | **+16%** | **cause not established** — see below |
 | Tiny (cam_bench) | 0.682 | 0.195 | −71% | too small — cold-start dominated (not a valid timing measurement) |
+
+**On robust_stress — a retracted explanation.** This was previously attributed to a
+"lockstep frontend" that propagates stalls the real CVA6 absorbs in its instruction
+queue. That explanation is **wrong on two counts**: (1) the VP *does* model the
+4-entry decoupled instruction queue (`fetch_queue`, `CPU_P64_6_Cycle.cpp:166`), and
+(2) the sign is backwards — a missing queue would make the VP **pessimistic**, but
+the VP is **optimistic** here (it runs *faster* than the RTL). No amount of missing
+decoupling can make a model too fast.
+
+Leading hypotheses, untested:
+- **Branch predictor mismatch.** robust_stress feeds its branch from an LCG *in
+  order to* defeat prediction, so mispredict rate × flush penalty dominates its
+  cycle count. If the VP mispredicts less often, or recovers more cheaply, it gains
+  cycles exactly where this benchmark spends them. Test: compare mispredict counts
+  first (isolates *rate*), then cycles-per-mispredict (isolates *penalty*).
+- **Uncalibrated MUL / store buffer.** robust_stress is mul+accumulate. Neither
+  unit has an isolated microbenchmark of the kind built for ALU, divide and FPU.
+
+Until a discriminating experiment separates these, this row states a measurement,
+not a diagnosis.
