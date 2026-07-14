@@ -1324,6 +1324,10 @@ void CPURV64P6_Cycle::Issue_stage() {
   if ((fu == FunctionalUnit::MUL && mul_fu.busy) ||
       (fu == FunctionalUnit::DIV && div_fu.busy) ||
       (fu == FunctionalUnit::FPU && (fpu_pipe_full() || fpu_divsqrt_fu.busy)) || // pipelined addmul; div/sqrt blocks
+      // FP loads (0x07) are classified as FPU but share the single LSU/D$ path,
+      // so they must also wait for dcache_miss_fu — otherwise a second FP load
+      // overwrites the in-flight miss and its scoreboard entry never completes.
+      (id_issue_reg.opcode == 0x07 && dcache_miss_fu.busy) ||
       (fu == FunctionalUnit::LSU &&
        (id_issue_reg.opcode == 0x03 || id_issue_reg.opcode == 0x2F) &&
        (dcache_miss_fu.busy || load_hit_fu.busy))) {
@@ -2781,6 +2785,7 @@ void CPURV64P6_Cycle::EX_stage() {
 
     // Handle address translation and PMP checking for float loads/stores
     uint64_t pa = 0;
+    bool fp_load_dcache_miss = false;
     if (issue_ex_reg.opcode == 0x07) { // Load-FP
       uint64_t vaddr = issue_ex_reg.rs1_val + issue_ex_reg.imm;
       // Alignment check
@@ -2841,6 +2846,11 @@ void CPURV64P6_Cycle::EX_stage() {
         scoreboard.complete(issue_ex_reg.rob_index, 0, 0);
         multi_cycle_dispatched = true;
         goto ex_done;
+      }
+      // FP loads go through the same L1 D$ as integer loads (CVA6 has one LSU).
+      if (!dcache.access(pa)) {
+        stats.dcache_misses++;
+        fp_load_dcache_miss = true;
       }
     } else if (issue_ex_reg.opcode == 0x27) { // Store-FP
       uint64_t vaddr = issue_ex_reg.rs1_val + issue_ex_reg.imm;
@@ -2973,7 +2983,16 @@ void CPURV64P6_Cycle::EX_stage() {
       scoreboard[issue_ex_reg.rob_index].is_store = false;
     }
 
-    if (latency <= 1) {
+    if (fp_load_dcache_miss) {
+      // FP load that missed in the D$: defer completion by the miss penalty,
+      // exactly as the integer load path does. The FP register file was already
+      // written by execute(); only the timing is modelled here.
+      dcache_miss_fu.busy = true;
+      dcache_miss_fu.remaining = dcache_miss_penalty - 1;
+      dcache_miss_fu.result = fpu_result;
+      dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
+      dcache_miss_fu.rd = issue_ex_reg.rd;
+    } else if (latency <= 1) {
       // Single-cycle FPU ops (FMV, FCLASS, etc.): complete immediately.
       scoreboard.complete(issue_ex_reg.rob_index, fpu_result, issue_ex_reg.rd);
     } else if (latency > 5) {

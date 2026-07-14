@@ -35,6 +35,49 @@ numerical correctness and cycle/IPC accuracy are checked. Benchmarks:
   (F/D decode dispatch, `f_regs` sharing, commit FP/int routing) was already
   correct.
 
+### A2. FP loads bypassed the D-cache model entirely *(FIXED)*
+- **Symptom:** `fp_bench` reported **CVA6 6 D$ misses / 47 accesses vs VP 0 / 0**,
+  despite both running the same binary — which contains 10 `fld` instructions that
+  load the FP constants (`0.9999`, `0.1`, …) from `.rodata`.
+- **Root cause:** `dcache.access()` was called from **exactly one site** in the
+  whole VP (`CPU_P64_6_Cycle.cpp`, integer-load path, opcode `0x03`). The FP load
+  path (opcode `0x07`) reaches memory through `D_extension.h:113`
+  (`mem_intf->readDataMem64()`), which never touches the cache model. So in the VP
+  an `fld` was a **free** memory access: no access counted, no miss counted, and
+  **no `dcache_miss_penalty` charged**. Real CVA6 has a single LSU — integer and FP
+  loads share the same L1 D$.
+- **Fix (two parts — the second is easy to miss):**
+  1. Probe `dcache.access(pa)` on the FP-load path once the physical address is
+     resolved (after MMU translation and the PMP check), and on a miss defer
+     completion through `dcache_miss_fu` exactly as the integer path does. The FP
+     register file is already written by `execute()`; only the *timing* is modelled.
+  2. **Add an Issue-stage structural guard for opcode `0x07`.** `dcache_miss_fu` is
+     a **single slot**, and the existing guard only covers `fu == LSU` with opcode
+     `0x03`/`0x2F`. FP loads are classified as `FunctionalUnit::FPU`, so without a
+     new guard a second FP load issues while the first miss is in flight,
+     **overwrites `dcache_miss_fu`, and the first load's scoreboard entry never
+     completes — the ROB head wedges and the VP hangs forever.** Part 1 alone hangs
+     `fp_bench` (10 back-to-back `fld`s) on the first run.
+- **Scope / deliberate omissions:** FP **stores** are still not counted — but
+  neither are integer stores (both are write-through and handled by the store
+  buffer), so the model stays internally consistent. Loads are what the D$ counters
+  track in this VP.
+- **Validation (measured, whole suite re-run):** `fp_bench` D$ accesses **0 → 10**
+  (exactly the 10 `fld`s in the binary), misses **0 → 2**. Cycles
+  2,510,107 → 2,510,207 (**+100**, 0.004%); `fp_stress` 5,900,516 → 5,900,619
+  (**+103**). **The other six benchmarks are cycle-for-cycle identical**, and every
+  result word is unchanged. IPC unmoved to three decimals.
+  - VP reports 2 misses where CVA6 reports 6: the same line-size ratio as the I$
+    (VP 64-byte lines vs CVA6 16-byte lines) over the same ~100 bytes of constants.
+- **Impact on prior results: negligible, and that is the point.** The affected
+  benchmarks were designed to be register-only, so the constants load a handful of
+  times outside the hot loop. **This bug does not explain fp_bench's +3.6% error**
+  (see §B3) and fixing it does not close that gap — B3's fitted FPnew latencies own
+  that residual.
+- **Why it matters anyway:** any FP workload that *streams* data from memory —
+  i.e. most real FP code — would have had its memory latency silently dropped. The
+  microbenchmarks hid the bug precisely because they were built to avoid memory.
+
 ### Note: numerical correctness of all units
 After A1, **every** benchmark's result word matches the CVA6 co-sim **bit-for-bit**
 (int `0x3fb776e12465e67d`, fp_bench `0x4184463b0cf87061`, fp_stress
@@ -204,6 +247,15 @@ verified).
   Not an execution difference. Earlier scattered deltas (+14/+46/+125) were
   `--max-instr` overshoot; adding an **HTIF halt** to every benchmark makes the
   offset a constant ~18–19.
+- **The counter window differs, so epilogue traffic shows up only in the VP.**
+  Each benchmark samples its counters with `csrr` *inside* the program, then runs a
+  readout epilogue (halter stores + the HTIF halt store). CVA6's counters are frozen
+  at the `csrr`; the VP keeps counting to its actual halt. This produces the constant
+  ~18-20 instruction offset **and** small phantom D$ deltas: `int_alu` is
+  register-only, so CVA6 reports **0** D$ accesses while the VP reports **1** —
+  epilogue memory traffic CVA6 was never alive to see. Not a modelling difference.
+  (Contrast `fp_bench`, whose `fld`s execute *before* the `csrr` and so are counted
+  by both — once §A2 was fixed.)
 - **HPM "access" counters are not directly comparable.** CVA6 I$/D$ *access* events
   count fetch/port *activity* (speculative, multi-port OR), so they exceed retired
   instructions and differ from the VP's exact software counters. Compare **miss
@@ -261,8 +313,8 @@ The three residuals are each understood:
 | div_stress | 186,659 | 1,130,126 | 186,678 | 1,126,502 |
 | long_test3 | 800,038 | 1,100,413 | 800,056 | 1,100,602 |
 | robust_stress | 3,127,046 | 4,567,925 | 3,127,063 | 4,442,704 |
-| fp_bench | 1,300,059 | 2,600,478 | 1,300,077 | 2,510,107 |
-| fp_stress | 900,047 | 6,200,440 | 900,065 | 5,900,516 |
+| fp_bench | 1,300,059 | 2,600,478 | 1,300,077 | 2,510,207 |
+| fp_stress | 900,047 | 6,200,440 | 900,065 | 5,900,619 |
 
 ### Benchmark design notes
 - `int_nobranch` / `int_indep` are **1024×-unrolled** so the loop branch is <0.1% of

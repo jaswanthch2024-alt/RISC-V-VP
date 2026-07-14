@@ -346,14 +346,20 @@ private:
     static constexpr size_t FETCH_QUEUE_CAPACITY{4};
 
     // L1 cache instances (Phase 4).
-    // I$: 16 KB, 4-way, 64 B lines — matches CVA6 cv64a6 default.
-    // D$: 32 KB, 8-way, 64 B lines — matches CVA6 cv64a6 default.
-    Cache<64, 4> icache;
-    Cache<64, 8> dcache;
+    // Geometry matched to CVA6 cv64a6_imafdc_sv39 (Icache/DcacheLineWidth = 128 b
+    // = 16 B lines, 256 sets):
+    //   I$: 16 KB, 4-way, 16 B lines  (256 sets × 4 ways × 16 B)
+    //   D$: 32 KB, 8-way, 16 B lines  (256 sets × 8 ways × 16 B)
+    Cache<256, 4, 16> icache;
+    Cache<256, 8, 16> dcache;
 
     int icache_miss_remaining{0}; // Cycles until current I$ miss resolves
-    int icache_miss_penalty{107};  // Settable before sc_start()
-    int dcache_miss_penalty{107};  // Settable before sc_start()
+    // Per-line refill latency for a 16 B line over the co-sim's AXI path
+    // (zero-wait-state SlaveFromFile memory). Measured from a streaming benchmark
+    // at ~9.5 cyc/line. NOTE: calibrated to the co-sim testbench memory, not to a
+    // real DRAM hierarchy — re-derive if a timed memory model is introduced.
+    int icache_miss_penalty{10};   // Settable before sc_start()
+    int dcache_miss_penalty{10};   // Settable before sc_start()
     int store_drain_remaining{0};  // Active write-through store cycles remaining
     int store_write_penalty{0};   // 0-cycle write-back store drain latency
     int load_hit_penalty{1};       // 1-cycle load-use stall on hits (L1 D$ latency)
