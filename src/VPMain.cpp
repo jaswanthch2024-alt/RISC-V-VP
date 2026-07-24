@@ -259,6 +259,13 @@ int sc_main(int argc, char* argv[]) {
                     }
 #endif
 
+                    // Diagnostic block below fires mid-stream, while the UART
+                    // console is still actively emitting characters for the
+                    // shell prompt — printing here interleaves with that live
+                    // output and garbles the terminal. Gate it behind an env
+                    // var so a "clean" boot (just the Linux console log) is
+                    // the default; set VP_BOOT_STATS=1 to restore it.
+                    if (std::getenv("VP_BOOT_STATS")) {
                     std::cout << "\n\n========================================\n";
                     std::cout << "         VP Boot Completed!\n";
                     std::cout << "========================================\n";
@@ -289,6 +296,7 @@ int sc_main(int argc, char* argv[]) {
                         }
                     }
 #endif
+                    } // VP_BOOT_STATS
                 }
             } else {
                 match_idx = (ch == target[0]) ? 1 : 0;
