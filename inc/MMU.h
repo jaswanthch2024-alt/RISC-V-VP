@@ -14,8 +14,8 @@ namespace riscv_tlm {
 // sv39 Memory Management Unit — TLBs + Page Table Walker.
 //
 // Design (CVA6-aligned):
-//   ITLB: 32-entry fully associative (instruction-side)
-//   DTLB: 32-entry fully associative (data-side)
+//   ITLB: 16-entry fully associative (instruction-side)
+//   DTLB: 16-entry fully associative (data-side)
 //   PTW:  3-level sv39 walk using physical memory via MemoryInterface.
 //         Each PTE read is modelled at ptw_mem_cycles cost (default 2 cycles,
 //         representing a warm PTW cache).
@@ -57,7 +57,7 @@ public:
         const uint16_t asid = static_cast<uint16_t>((satp >> 44) & 0xFFFF);
 
         // Check appropriate TLB.
-        TLB<32>& tlb = (atype == FETCH) ? itlb : dtlb;
+        TLB<16>& tlb = (atype == FETCH) ? itlb : dtlb;
         uint64_t ppn = 0; uint8_t perm = 0; uint8_t level = 0;
 
         if (tlb.lookup(vaddr, asid, ppn, perm, level)) {
@@ -138,8 +138,8 @@ public:
     } stats;
 
 private:
-    TLB<32>         itlb;
-    TLB<32>         dtlb;
+    TLB<16>         itlb;
+    TLB<16>         dtlb;
     MemoryInterface* mem;
     int             ptw_cycles_per_level;
     int             sfence_call_count{0};

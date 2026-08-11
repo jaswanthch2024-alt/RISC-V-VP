@@ -377,8 +377,8 @@ void CPURV64P6_Cycle::PCGen_stage() {
   pcgen_fetch_next.valid = true;
 
   // --- Branch Prediction (CVA6-Aligned) ---
-  uint32_t btb_idx = (current_pc >> 2) % 128; // Word-aligned indexing
-  uint32_t bht_idx = (current_pc >> 2) % 256;
+  uint32_t btb_idx = (current_pc >> 2) % 32; // Word-aligned indexing
+  uint32_t bht_idx = (current_pc >> 2) % 128;
 
   bool predict_taken = false;
   uint64_t pt_target = 0;
@@ -2485,8 +2485,8 @@ void CPURV64P6_Cycle::EX_stage() {
         (branch_taken && (branch_target != issue_ex_reg.predicted_target));
 
     // Train Predictor
-    uint32_t btb_idx = (issue_ex_reg.pc >> 2) % 128;
-    uint32_t bht_idx = (issue_ex_reg.pc >> 2) % 256;
+    uint32_t btb_idx = (issue_ex_reg.pc >> 2) % 32;
+    uint32_t bht_idx = (issue_ex_reg.pc >> 2) % 128;
 
     if (issue_ex_reg.opcode == 0x63) { // Conditional Branch
       uint8_t current_bht = bht[bht_idx];
@@ -2510,7 +2510,7 @@ void CPURV64P6_Cycle::EX_stage() {
       // RAS Maintenance
       if (issue_ex_reg.is_ras_call) {
         ras.push_back(issue_ex_reg.pc + (issue_ex_reg.is_compressed ? 2 : 4));
-        if (ras.size() > 4)
+        if (ras.size() > 2)
           ras.erase(ras.begin());
       }
       if (issue_ex_reg.is_ras_return) {

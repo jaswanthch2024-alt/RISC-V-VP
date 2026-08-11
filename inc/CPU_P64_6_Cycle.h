@@ -256,13 +256,13 @@ private:
     };
     
     // Direct-mapped BTB, 128 entries (indexed by PC[8:2])
-    BTBEntry btb[128];
+    BTBEntry btb[32];
 
     // Branch History Table (BHT), 256 entries of 2-bit saturating counters
     // State: 00 (Strongly Not Taken), 01 (Weakly Not Taken)
     //        10 (Weakly Taken),       11 (Strongly Taken)
     // Indexed by PC[9:2]
-    uint8_t bht[256]; 
+    uint8_t bht[128]; 
 
     // Return Address Stack (RAS), 4-entry LIFO
     std::vector<uint64_t> ras;
