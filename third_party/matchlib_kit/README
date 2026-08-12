@@ -1,0 +1,164 @@
+
+
+Introduction
+
+This kit contains complete source code to enable you to build and run a representative
+set of Matchlib examples without needing any EDA tool installations or any other downloads.
+The examples run on the open source Accellera SystemC simulator, which is included in this kit.
+There is an overview of Matchlib in ./matchlib_examples/doc/matchlib_accellera_presentation.pdf 
+
+Matchlib is starting to be discussed within the Accellera Synthesis Working Group for possible
+standardization. If you are interested in participating in the discussion, see the information here:
+
+https://www.accellera.org/activities/working-groups
+
+
+Contents of Kit
+
+matchlib_examples          - Matchlib examples directory - the primary content of this kit.
+matchlib_examples/examples - Matchlib examples. Each example includes a README file.
+matchlib_examples/doc      - Matchlib examples documentation.
+matchlib_examples/doc/matchlib_training.pdf   - Detailed Matchlib training slides.
+matchlib_examples/doc/matchlib_reference_manual.pdf   - Matchlib reference manual.
+
+ac_simutils-master         - AC Simulation utilities downloaded from github
+ac_types-master	           - AC Types downloaded from github
+ac_math-master	           - AC Math downloaded from github
+rapidjson-master	   - RapidJson downloaded from github
+matchlib_connections-master -Matchlib connections downloaded from github
+matchlib-main              - Matchlib library downloaded from github
+systemc-2.3.3	           - Open source SystemC kit from Accellera.org (completely unmodified)
+
+README	                   - This file
+LICENSE		           - Open Source LICENSE file
+setenvs.csh	           - Setup script for csh
+setenvs.sh	           - Setup script for sh and bash
+
+
+Web Links
+
+See the web links section at bottom of this file for useful web links.
+
+
+Download and Setup
+
+This kit should work on most linux compatible systems.
+You can download the zip file for the entire kit from github, 
+or you can use the git clone command to clone the repository to your local machine.
+
+If you are using csh, type:
+  source setenvs.csh
+to setup necessary shell environment variables.
+
+If you are using sh or bash, type:
+  source setenvs.sh
+to setup necessary shell environment variables.
+
+All subsequent build steps must be done in a shell that has these environment variables set.
+
+
+
+Building the SystemC Library
+
+Before running any examples, you need to build the SystemC simulator.
+This only needs to be done once.
+Type:
+  sh build_systemc.sh
+
+This may take several minutes to complete, and must complete without errors in order
+to run the examples.
+
+(To run AddressSanitizer, you must use a build of the SystemC simulator that uses pthreads.
+If you want to do this, use
+  sh pthreads_build_systemc.sh
+instead of the build_systemc.sh command above.)
+
+Note that the SystemC simulator is the standard Accellera download and is completely unmodified.
+
+
+Running a Test Example
+ 
+To run a test, 
+  cd matchlib_examples/examples/05_push_pop
+  make build
+  ./sim_sc
+
+Read the README files in the examples directories for further steps.
+
+
+Documentation
+
+It is recommended that you browse all of the documents in matchlib_examples/doc 
+Training material is available in matchlib_examples/doc/matchlib_training.pdf
+
+
+Waveform Viewing
+
+You can use Questa (vsim), VCS, or similar simulators to view the trace.vcd files
+produced from the SystemC simulations in the examples. Alternatively you can download
+the open source gtkwave waveform viewer (google gtkwave).
+
+
+Cleanup
+
+To clean up all generated files in the examples and in the SystemC built library,
+type:
+  sh clean_all.sh
+
+
+
+Web Links
+
+The most recent updates to this kit may be found at:
+https://github.com/Stuart-Swan/Matchlib-Examples-Kit-For-Accellera-Synthesis-WG/tree/master
+
+A youtube video from NVidia on Matchlib is available here:
+https://www.youtube.com/watch?v=n8_G-CaSSPU
+
+A youtube video from Google on using Catapult HLS to build their video encoder chip is here:
+https://youtu.be/Kz4N0SvRPuQ?t=3524
+
+An video from NVidia Research on their recent usage of Matchlib and Catapult HLS,
+including their 2024 ALPhA-Vision gaze detection SOC tapeout, is here:
+https://hls.academy/topics/systemc-modeling/nvidia-high-level-synthesis-in-agile-system-on-chip-flows-overview-and-techniques/
+
+Introductory Slides from NVidia Research on Matchlib:
+https://eri-summit.darpa.mil/docs/Khailany_Brucek_CRAFT_Final.pdf
+
+Free IEEE SystemC LRM download:
+https://ieeexplore.ieee.org/document/10246125
+
+Free Accellera SystemC synthesizeable subset draft standard:
+https://accellera.org/images/downloads/drafts-review/SystemC_Synthesis_Subset_Draft_1_4.pdf
+
+Free SystemC training resources:
+https://www.doulos.com/knowhow/systemc/
+
+Additional HLS libraries such as AC DSP can be found here:
+hlslibs.org
+
+If you are interested in NVidia's Interconnect Prototype Assistant,
+which runs with Matchlib, see the following links:
+https://research.nvidia.com/publication/2021-11_IPA%3A-Floorplan-Aware-SystemC
+https://github.com/NVlabs/IPA
+
+If you are interested in advanced bus fabric models built using Matchlib 
+(for example AXI4 ACE support), you may also wish to refer to:
+https://github.com/ic-lab-duth/NoCpad
+
+Additional larger open souce Matchlib examples can be found at:
+https://hlslibs.org/UniversityPartners.html
+
+Original NVidia Matchlib DAC 2018 paper can be downloaded from this page:
+https://research.nvidia.com/publication/2018-06_modular-digital-vlsi-flow-high-productivity-soc-design
+
+Online discussion related to this kit can be viewed and created here:
+https://forums.accellera.org/forum/10-systemc-language/
+
+Matchlib is starting to be discussed within the Accellera Synthesis Working Group for possible
+standardization. If you are interested in participating in the discussion, see the information here:
+https://www.accellera.org/activities/working-groups
+
+Accellera promo video on joining the Synthesis Working Group:
+https://vimeo.com/929513471
+
