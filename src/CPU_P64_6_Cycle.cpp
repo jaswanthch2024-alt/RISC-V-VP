@@ -79,6 +79,13 @@ void CPURV64P6_Cycle::set_clock(sc_core::sc_clock *c) {
   clk = c;
   if (clk)
     clock_period = clk->period();
+#ifdef ENABLE_AXI_CONTENTION
+  // Build the AXI contention subsystem now that the clock exists. Elaboration
+  // happens here (before sc_start), which is legal during module setup.
+  if (clk && !axi_top) {
+    axi_top = new riscv_axi::AxiContentionTop(clk, axi_slave_latency);
+  }
+#endif
 }
 
 // =============================================================================
@@ -417,6 +424,14 @@ void CPURV64P6_Cycle::Fetch_stage() {
   // Flush: cancel pending I$ miss and inject bubble.
   if (flush_pipeline) {
     icache_miss_remaining = 0;
+#ifdef ENABLE_AXI_CONTENTION
+    // Release any in-flight I$ refill so the master drains cleanly (its read
+    // completes and is discarded; ack drops req so it won't stall on us).
+    if (icache_axi_pending) {
+      axi_top->ack(riscv_axi::AxiContentionTop::ICACHE);
+      icache_axi_pending = false;
+    }
+#endif
     fetch_id_next.valid = false;
     return;
   }
@@ -440,6 +455,22 @@ void CPURV64P6_Cycle::Fetch_stage() {
   // While counting down, hold the PC (stall_pcgen) and inject bubbles
   // downstream. When the counter reaches 0 we fall through and re-fetch (the
   // cache line is now warm).
+#ifdef ENABLE_AXI_CONTENTION
+  // AXI mode: an in-flight I$ refill completes when the arbiter+slave return
+  // the read. Poll done(); on completion, ack and fall through to re-fetch.
+  if (icache_axi_pending) {
+    if (axi_top->done(riscv_axi::AxiContentionTop::ICACHE)) {
+      axi_top->ack(riscv_axi::AxiContentionTop::ICACHE);
+      icache_axi_pending = false;
+      // fall through: cache line now warm, re-fetch this cycle
+    } else {
+      stats.icache_miss_cycles++;
+      stall_pcgen = true;
+      fetch_id_next.valid = false;
+      return;
+    }
+  }
+#else
   if (icache_miss_remaining > 0) {
     icache_miss_remaining--;
     stats.icache_miss_cycles++;
@@ -447,6 +478,7 @@ void CPURV64P6_Cycle::Fetch_stage() {
     fetch_id_next.valid = false;
     return;
   }
+#endif
 
   uint64_t current_pc = pcgen_fetch_reg.pc;
   uint32_t instr = 0;
@@ -498,7 +530,14 @@ void CPURV64P6_Cycle::Fetch_stage() {
   // --- I$ hit/miss check ---
   if (!icache.access(current_pc)) { // I$ indexed by VA (VIPT)
     stats.icache_misses++;
+#ifdef ENABLE_AXI_CONTENTION
+    // Post the refill through the shared AXI port; latency (incl. contention
+    // behind a D$ miss) emerges from the arbiter + slave, not a flat counter.
+    axi_top->request(riscv_axi::AxiContentionTop::ICACHE, fetch_pa);
+    icache_axi_pending = true;
+#else
     icache_miss_remaining = icache_miss_penalty - 1;
+#endif
     stats.icache_miss_cycles++;
     stall_pcgen = true;
     fetch_id_next.valid = false;
@@ -1434,6 +1473,9 @@ void CPURV64P6_Cycle::Issue_stage() {
     }
     scoreboard.flush();
     store_buffer.flush_speculative();
+#ifdef ENABLE_AXI_CONTENTION
+    if (dcache_miss_fu.busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+#endif
     mul_fu.busy = div_fu.busy = dcache_miss_fu.busy =
         load_hit_fu.busy = false;
     for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
@@ -1504,12 +1546,23 @@ void CPURV64P6_Cycle::EX_stage() {
   }
   if (dcache_miss_fu.busy) {
     stats.dcache_miss_cycles++;
+#ifdef ENABLE_AXI_CONTENTION
+    // AXI mode: the D$ refill completes when the arbiter+slave return the read
+    // (may be delayed behind an I$ miss holding the shared port = contention).
+    if (axi_top->done(riscv_axi::AxiContentionTop::DCACHE)) {
+      axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+      scoreboard.complete(dcache_miss_fu.trans_id, dcache_miss_fu.result,
+                          dcache_miss_fu.rd);
+      dcache_miss_fu.busy = false;
+    }
+#else
     if (--dcache_miss_fu.remaining == 0) {
 
       scoreboard.complete(dcache_miss_fu.trans_id, dcache_miss_fu.result,
                           dcache_miss_fu.rd);
       dcache_miss_fu.busy = false;
     }
+#endif
   }
   if (load_hit_fu.busy) {
     stats.load_use_stall_cycles++;
@@ -2006,7 +2059,11 @@ void CPURV64P6_Cycle::EX_stage() {
         // DTLB miss: add PTW latency to effective load latency.
         stats.dtlb_miss_cycles += static_cast<uint64_t>(tr.stall_cycles);
         dcache_miss_fu.busy = true;
+#ifdef ENABLE_AXI_CONTENTION
+        axi_top->request(riscv_axi::AxiContentionTop::DCACHE, tr.paddr);
+#else
         dcache_miss_fu.remaining = tr.stall_cycles + dcache_miss_penalty - 1;
+#endif
         dcache_miss_fu.result =
             0; // placeholder, overwritten below after real read
         dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
@@ -2146,7 +2203,11 @@ void CPURV64P6_Cycle::EX_stage() {
         if (!dcache.access(addr)) {
           stats.dcache_misses++;
           dcache_miss_fu.busy = true;
+#ifdef ENABLE_AXI_CONTENTION
+          axi_top->request(riscv_axi::AxiContentionTop::DCACHE, addr);
+#else
           dcache_miss_fu.remaining = dcache_miss_penalty - 1;
+#endif
           dcache_miss_fu.result = mem_result;
           dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
           dcache_miss_fu.rd = issue_ex_reg.rd;
@@ -2544,7 +2605,19 @@ void CPURV64P6_Cycle::EX_stage() {
       cancel_if_flushed(div_fu);
       for (int fs = 0; fs < FPU_SLOTS; fs++) cancel_if_flushed(fpu_pipe[fs]);
       cancel_if_flushed(fpu_divsqrt_fu);
+#ifdef ENABLE_AXI_CONTENTION
+      // Selective flush: release the D$ AXI refill only if this branch actually
+      // cancelled it (younger than the mispredicted branch). An older, still-
+      // valid D$ miss keeps its in-flight request.
+      {
+        bool was_busy = dcache_miss_fu.busy;
+        cancel_if_flushed(dcache_miss_fu);
+        if (was_busy && !dcache_miss_fu.busy)
+          axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+      }
+#else
       cancel_if_flushed(dcache_miss_fu);
+#endif
       cancel_if_flushed(load_hit_fu);
     }
   }
@@ -2786,6 +2859,7 @@ void CPURV64P6_Cycle::EX_stage() {
     // Handle address translation and PMP checking for float loads/stores
     uint64_t pa = 0;
     bool fp_load_dcache_miss = false;
+    uint64_t fp_load_pa = 0; // carries FP-load paddr to the miss-handling site (AXI)
     if (issue_ex_reg.opcode == 0x07) { // Load-FP
       uint64_t vaddr = issue_ex_reg.rs1_val + issue_ex_reg.imm;
       // Alignment check
@@ -2851,6 +2925,7 @@ void CPURV64P6_Cycle::EX_stage() {
       if (!dcache.access(pa)) {
         stats.dcache_misses++;
         fp_load_dcache_miss = true;
+        fp_load_pa = pa;
       }
     } else if (issue_ex_reg.opcode == 0x27) { // Store-FP
       uint64_t vaddr = issue_ex_reg.rs1_val + issue_ex_reg.imm;
@@ -2988,7 +3063,11 @@ void CPURV64P6_Cycle::EX_stage() {
       // exactly as the integer load path does. The FP register file was already
       // written by execute(); only the timing is modelled here.
       dcache_miss_fu.busy = true;
+#ifdef ENABLE_AXI_CONTENTION
+      axi_top->request(riscv_axi::AxiContentionTop::DCACHE, fp_load_pa);
+#else
       dcache_miss_fu.remaining = dcache_miss_penalty - 1;
+#endif
       dcache_miss_fu.result = fpu_result;
       dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
       dcache_miss_fu.rd = issue_ex_reg.rd;
@@ -3059,6 +3138,9 @@ ex_done:
 
     scoreboard.flush();
     store_buffer.flush_speculative();
+#ifdef ENABLE_AXI_CONTENTION
+    if (dcache_miss_fu.busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+#endif
     mul_fu.busy = div_fu.busy = dcache_miss_fu.busy =
         load_hit_fu.busy = false;
     for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
@@ -3206,6 +3288,9 @@ bool CPURV64P6_Cycle::cpu_process_IRQ() {
 
   scoreboard.flush();
   store_buffer.flush_speculative();
+#ifdef ENABLE_AXI_CONTENTION
+  if (dcache_miss_fu.busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+#endif
   mul_fu.busy = div_fu.busy = dcache_miss_fu.busy = false;
   for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
   fpu_divsqrt_fu.busy = false;

@@ -36,12 +36,12 @@ option(USE_LOCAL_SYSTEMC "Use vendored SystemC located in systemc/ subdir" ON)
 option(BUILD_ROBUST_HEX "Build robust_system_test hex images" ON)
 
 # Timing Model Selection (mutually exclusive)
-set(TIMING_MODEL "LT" CACHE STRING "CPU Timing Model: LT, AT, CYCLE, or CYCLE6")
-set_property(CACHE TIMING_MODEL PROPERTY STRINGS "LT" "AT" "CYCLE" "CYCLE6")
+set(TIMING_MODEL "LT" CACHE STRING "CPU Timing Model: LT, AT, CYCLE, CYCLE6, or CYCLE6_AXI")
+set_property(CACHE TIMING_MODEL PROPERTY STRINGS "LT" "AT" "CYCLE" "CYCLE6" "CYCLE6_AXI")
 
 # Validate timing model
-if(NOT TIMING_MODEL MATCHES "^(LT|AT|CYCLE|CYCLE6)$")
-  message(FATAL_ERROR "Invalid TIMING_MODEL: ${TIMING_MODEL}. Must be LT, AT, CYCLE, or CYCLE6.")
+if(NOT TIMING_MODEL MATCHES "^(LT|AT|CYCLE|CYCLE6|CYCLE6_AXI)$")
+  message(FATAL_ERROR "Invalid TIMING_MODEL: ${TIMING_MODEL}. Must be LT, AT, CYCLE, CYCLE6, or CYCLE6_AXI.")
 endif()
 
 message(STATUS "========================================")
@@ -139,12 +139,43 @@ target_include_directories(riscv_vp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inc 
 if(ENABLE_PIPELINED_ISS)
   if(TIMING_MODEL STREQUAL "CYCLE6")
     # CYCLE6 (6-Stage Cycle-Accurate) model
-    target_sources(riscv_vp_core PRIVATE 
-      src/CPU_P32_6_Cycle.cpp 
+    target_sources(riscv_vp_core PRIVATE
+      src/CPU_P32_6_Cycle.cpp
       src/CPU_P64_6_Cycle.cpp
     )
     target_compile_definitions(riscv_vp_core PUBLIC ENABLE_PIPELINED_ISS=1 ENABLE_CYCLE6_MODEL=1)
     message(STATUS "Pipelined ISS enabled with CYCLE6 (6-Stage Cycle-Accurate) model")
+  elseif(TIMING_MODEL STREQUAL "CYCLE6_AXI")
+    # CYCLE6_AXI: same 6-stage pipeline + real matchlib AxiArbiter I$/D$
+    # contention model (microbenchmark-only; NOT for Linux boot). Adds the
+    # vendored, header-only matchlib kit and its required defines. Builds
+    # against the VP's own SystemC 3.0.2 (verified in Phase 0).
+    set(MATCHLIB_KIT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/matchlib_kit")
+    if(NOT EXISTS "${MATCHLIB_KIT}/matchlib-main/cmod/include/axi/AxiArbiter.h")
+      message(FATAL_ERROR "CYCLE6_AXI needs the vendored matchlib kit at ${MATCHLIB_KIT} (missing).")
+    endif()
+    target_sources(riscv_vp_core PRIVATE
+      src/CPU_P32_6_Cycle.cpp
+      src/CPU_P64_6_Cycle.cpp
+      src/axi/AxiContentionTop.cpp
+    )
+    target_include_directories(riscv_vp_core PUBLIC
+      ${MATCHLIB_KIT}/matchlib_examples/include
+      ${MATCHLIB_KIT}/matchlib-main/cmod/include
+      ${MATCHLIB_KIT}/matchlib_connections-master/include
+      ${MATCHLIB_KIT}/ac_types-master/include
+      ${MATCHLIB_KIT}/ac_simutils-master/include
+      ${MATCHLIB_KIT}/ac_math-master/include
+      ${MATCHLIB_KIT}/rapidjson-master/include
+      ${MATCHLIB_KIT}/Boost-Preprocessor-master/include
+    )
+    target_compile_definitions(riscv_vp_core PUBLIC
+      ENABLE_PIPELINED_ISS=1 ENABLE_CYCLE6_MODEL=1 ENABLE_AXI_CONTENTION=1
+      CONNECTIONS_ACCURATE_SIM=1 HLS_CATAPULT=1 ENABLE_AC_VCD_TRACE=0)
+    # matchlib headers trip -Wall/-Wextra/-Wpedantic heavily; relax for the core
+    # in this target so the (unmodified, vendored) kit compiles clean.
+    target_compile_options(riscv_vp_core PRIVATE -Wno-error -Wno-unused-parameter -Wno-unused-variable -Wno-deprecated-declarations)
+    message(STATUS "Pipelined ISS enabled with CYCLE6_AXI (matchlib AxiArbiter I\$/D\$ contention)")
   elseif(TIMING_MODEL STREQUAL "CYCLE")
     # CYCLE (Cycle-Accurate) model - uses blocking transport with cycle-accurate logic
     target_sources(riscv_vp_core PRIVATE 

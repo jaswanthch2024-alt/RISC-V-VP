@@ -237,6 +237,117 @@ verified).
 - **Supersedes the retracted "lockstep frontend" explanation** (see §D), which was
   wrong on both mechanism and sign.
 
+### B7. Memory-bound: VP over-serialises the D-cache — and the CVA6 cache was mischaracterised *(cause 1 FIXED in §B8; cause 2 OPEN)*
+- **Symptom:** on a purpose-built memory-thrash benchmark (`mem_contention_bench`:
+  32 KB unrolled read body > 16 KB I$, sweeping a 64 KB region > 32 KB D$, so both
+  L1s miss heavily and *concurrently*), the VP runs **much slower** than the RTL:
+
+  | mem_contention | Instr | Cycles | IPC | I$ miss | D$ miss |
+  |---|---:|---:|---:|---:|---:|
+  | CVA6 co-sim (RTL) | 1,638,463 | 4,334,798 | 0.378 | 332,537 | 167,093 |
+  | Fast VP (CYCLE6)  | 1,638,480 | 5,699,038 | 0.288 | 405,627 | 204,804 |
+  | CYCLE6_AXI (arb.) | 1,638,480 | 6,018,449 | 0.272 | 405,627 | 204,804 |
+
+  The VP **over-counts cycles by +31%** before any contention modelling.
+- **Two distinct root causes:**
+  1. **Over-missing ~22% — FIXED (§B8).** Was a replacement-policy mismatch: the
+     VP used LRU, CVA6 uses LFSR random. After the fix, miss counts match RTL to
+     within 0.1% (I$ 332,743, D$ 166,923) and the fast-VP gap fell +31% → +18%.
+  2. **The VP's memory model is too serial vs CVA6's memory-level parallelism —
+     OPEN.** The blocking is on the *VP* side, not CVA6's. The VP has a single
+     `dcache_miss_fu` slot, flat ~10-cyc penalty, one miss at a time, and **no
+     overlap between I$ and D$ misses**. CVA6-WT overlaps: (a) stores via an
+     **8-entry coalescing write buffer** (`WtDcacheWbufDepth=8`,
+     `MaxOutstandingStores=7`); (b) **I$ and D$ refills are outstanding
+     concurrently on the AXI** — `wt_axi_adapter.sv` carries *separate*
+     `icache_rtrn_tid` / `dcache_rtrn_tid`, so their miss latencies overlap
+     rather than serialise; (c) a single read MSHR + 2 load-buffer entries per
+     cache. **CVA6 is NOT a blocking cache.**
+- **⚠ CVA6 cache mischaracterisation (correct the docs AND the paper in revision).**
+  The co-sim config `cv64a6_imafdc_sv39` selects `DcacheType = config_pkg::WT`
+  (write-through). `wt_dcache_missunit.sv` has a **single** read MSHR (`mshr_q`,
+  one register — not the multi-entry MSHR array of `std_nbdcache`/`hpdcache`).
+  So CVA6-WT is **NOT** a "non-blocking MSHR cache that pipelines concurrent
+  misses" — that describes CVA6's *other* (unused) cache options. The paper's
+  §IV-D, §VI-E(3) and §VII assert non-blocking/MSHR; that wording is inaccurate
+  for the WT config and should be revised to "write-through cache with an
+  8-entry write buffer and a single read MSHR." (Paper submitted for initial
+  review 2026-08; fold the fix into the post-review revision.)
+- **AXI contention experiment (negative result).** A real matchlib `AxiArbiter`
+  I$/D$ port-contention model was built as an isolated opt-in build
+  (`TIMING_MODEL=CYCLE6_AXI`; vendored matchlib in `third_party/matchlib_kit`,
+  builds against the VP's own SystemC 3.0.2). It is *mechanically correct*
+  (arbitrates, functionally bit-identical, default build byte-for-byte unchanged)
+  but moves accuracy the **wrong way**, and the reason is now confirmed at the
+  mechanism level, not just empirically: **its premise is backwards.** Contention
+  assumes I$ and D$ *compete* for one port and serialise; the RTL gives them
+  *separate AXI transaction IDs* (`wt_axi_adapter.sv`) so they *overlap*. Real
+  CVA6 has **more** memory-level parallelism than the VP, not less. Post-§B8
+  (LFSR) three-way makes this stark:
+
+  | mem_contention | Cycles | vs RTL |
+  |---|---:|---:|
+  | CVA6 RTL (overlaps I$/D$)      | 4,334,798 | — |
+  | Fast VP LFSR (serialises)      | 5,131,111 | +18.4% |
+  | CYCLE6_AXI LFSR (forces serial)| 5,408,510 | +24.8% |
+
+  The arbiter (least parallel) is furthest from the RTL (most parallel). **Keep
+  CYCLE6_AXI as an optional build; do not enable by default and do not pursue it
+  for memory-bound accuracy.** The correct direction for the residual is the
+  *opposite* — give the VP overlapping/outstanding misses (I$ ∥ D$ + write
+  buffer), which would pull 5.13M *down* toward 4.33M.
+- **Note:** the register-only microbenchmarks never expose this — they are
+  cache-resident (≈1 D$ miss), so fast VP, CYCLE6_AXI and co-sim all agree there.
+  A both-caches-thrashing workload is required to see it.
+
+### B8. Cache replacement was LRU, but CVA6 uses LFSR random — VP over-missed ~22% *(FIXED)*
+- **This is the root cause of B7 cause (1)** (the ~22% miss-count gap). Resolved.
+- **Root cause:** `inc/Cache.h` modelled **LRU** replacement; both CVA6 L1 caches
+  use **8-bit LFSR pseudo-random** replacement (fill an invalid way first, else
+  evict a random way):
+  - I$: `cva6_icache.sv:389-391` — *"chose random replacement if all are valid"*,
+    `repl_way = all_ways_valid ? rnd_way : inv_way`, `rnd_way` from an LFSR.
+  - D$ (WT): `wt_dcache_missunit.sv:200-210` — `lfsr #(.LfsrWidth(8))`,
+    `repl_way = all_ways_valid ? rnd_way : inv_way`.
+- **Why it mattered:** for a sequential scan of a working set larger than the
+  cache, **LRU is pathologically pessimal** — it evicts exactly the line about to
+  be reused next pass, so ~100% of accesses miss. Random replacement statistically
+  retains a fraction, so it misses less. The geometry was already identical
+  (I$ 16 KB/4-way/16 B, D$ 32 KB/8-way/16 B), so replacement was the *only*
+  difference — and it produced a systematic +22% miss bias on reuse-with-eviction.
+- **Why it hid:** the validated streaming test (§VI-D of the paper) is
+  compulsory-miss-only (single sweep), where LRU and random give identical counts;
+  register-only microbenchmarks are cache-resident (≈0 misses). Only a
+  re-swept-working-set workload (`mem_contention_bench`) exposes it.
+- **Fix:** `Cache.h` now fills the first invalid way, else evicts
+  `lfsr % WAYS` and advances an 8-bit Fibonacci LFSR (taps x^8+x^6+x^5+x^4+1),
+  one LFSR shared across sets — mirroring CVA6's single-LFSR scheme and its
+  `update_lfsr = cache_wren & all_ways_valid` timing. `lru_time` removed.
+- **Result — miss counts now match RTL to within 0.1%:**
+
+  | mem_contention | I$ miss | D$ miss | Cycles | IPC |
+  |---|---:|---:|---:|---:|
+  | CVA6 RTL          | 332,537 | 167,093 | 4,334,798 | 0.378 |
+  | VP LRU (before)   | 405,627 | 204,804 | 5,699,038 | 0.288 |
+  | **VP LFSR (after)** | **332,743** | **166,923** | **5,131,111** | **0.319** |
+
+  I$ +0.06%, D$ −0.10% (were +22% / +23%). The cycle gap to RTL shrank from
+  **+31.5% → +18.4%**; the residual is now attributable to B7 cause (2) (the VP's
+  fully-blocking D-cache vs CVA6-WT's 8-entry write buffer + single read MSHR),
+  no longer confounded by miss counts.
+- **Zero regression:** all validated microbenchmarks bit-identical after the swap
+  (int_alu 2,400,256; int_nobranch 3,081,167; int_indep 2,249,992; robust_stress
+  4,442,265) — their misses are cold/compulsory, hence replacement-independent.
+- **⚠ Not bit-exact vs RTL by construction:** matching CVA6's exact miss *sequence*
+  would need its precise LFSR seed/polynomial and per-cycle update timing. This
+  removes the systematic LRU bias and lands within ~0.1% on counts; small
+  per-workload differences from LFSR phase are expected and acceptable.
+- **Paper implication (revision):** the SpMV 9.3% residual, attributed in §VI-E(3)
+  to the blocking D-cache, is likely **substantially a replacement-policy artifact**
+  (LRU vs random) — SpMV's irregular gather has heavy reuse-with-eviction. Re-run
+  SpMV with this fix before committing to the "MSHR layer is highest priority"
+  framing; the cheap correct fix (this) may absorb most of it.
+
 ---
 
 ## C. Measurement caveats discovered

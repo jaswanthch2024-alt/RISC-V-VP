@@ -37,6 +37,9 @@
 #include "Cache.h"
 #include "CSR_File.h"
 #include "MMU.h"
+#ifdef ENABLE_AXI_CONTENTION
+#include "axi/AxiContentionTop.h"
+#endif
 
 namespace riscv_tlm {
 
@@ -352,6 +355,15 @@ private:
     //   D$: 32 KB, 8-way, 16 B lines  (256 sets × 8 ways × 16 B)
     Cache<256, 4, 16> icache;
     Cache<256, 8, 16> dcache;
+
+#ifdef ENABLE_AXI_CONTENTION
+    // Real matchlib AxiArbiter I$/D$ contention subsystem (CYCLE6_AXI build).
+    // Constructed in set_clock() once the sc_clock is known. Miss latency is
+    // produced by the arbiter+slave instead of the flat software counters.
+    riscv_axi::AxiContentionTop* axi_top{nullptr};
+    bool icache_axi_pending{false}; // an I$ refill is in flight through the arbiter
+    int  axi_slave_latency{4};      // calibration knob (uncontended refill ~= this + wrapper)
+#endif
 
     int icache_miss_remaining{0}; // Cycles until current I$ miss resolves
     // Per-line refill latency for a 16 B line over the co-sim's AXI path
