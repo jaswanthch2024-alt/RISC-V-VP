@@ -296,6 +296,30 @@ verified).
   for memory-bound accuracy.** The correct direction for the residual is the
   *opposite* — give the VP overlapping/outstanding misses (I$ ∥ D$ + write
   buffer), which would pull 5.13M *down* toward 4.33M.
+- **Store-drain master — tested, does NOT help (measured, not assumed).** The VP
+  models stores as *doubly* free: it never calls `dcache.access()` on the store
+  path (so store misses aren't even counted) and `store_write_penalty=0`. That
+  looked like a gap worth a store-drain master. A store-flood benchmark
+  (`mem_store_bench`, 1024x-unrolled write sweep) settled it:
+
+  | mem_store_bench | Cycles | I$ miss | D$ miss |
+  |---|---:|---:|---:|
+  | CVA6 RTL       | 772,390 | 67,623 | **1** |
+  | Fast VP        | 975,402 | 67,679 | **3** |
+
+  CVA6 reports **~0 D$ misses on a store flood** — its write-through **write
+  buffer absorbs the stores** with no miss count and no meaningful cycle cost, so
+  stores are effectively free on the RTL *too*, matching the VP. The +26% gap is
+  the same I$-serialisation residual (this benchmark is I$-dominated), not stores.
+  Adding a store-drain cost/master would push the VP further from the RTL — same
+  wrong direction as the I$/D$ arbiter. **Do not add store-drain modelling.**
+- **DMA master — cannot be validated against this co-sim.** `cva6_matchlib_system`
+  has `slave_count=4` (bootrom, dram, console, halter) — **no DMA** — and the CVA6
+  core RTL has no DMA engine. The VP's DMA (`inc/DMA.h` @ 0x30000000) is a
+  VP-only SoC peripheral. So there is **no RTL ground truth** for DMA; a
+  DMA-contention model cannot improve agreement with a reference that contains no
+  DMA. **Out of scope for co-sim accuracy** (would only matter against a full SoC
+  reference with DMA, which we don't have).
 - **Note:** the register-only microbenchmarks never expose this — they are
   cache-resident (≈1 D$ miss), so fast VP, CYCLE6_AXI and co-sim all agree there.
   A both-caches-thrashing workload is required to see it.
@@ -347,6 +371,62 @@ verified).
   (LRU vs random) — SpMV's irregular gather has heavy reuse-with-eviction. Re-run
   SpMV with this fix before committing to the "MSHR layer is highest priority"
   framing; the cheap correct fix (this) may absorb most of it.
+- **SpMV verification (integer variant, so the co-sim runs FP-free):** with §B8,
+  the VP's D$ miss count on the SpMV gather matches the RTL to **0.17%** (VP 7,777
+  vs RTL 7,764). Confirms the SpMV *memory* divergence was replacement policy, now
+  resolved. (A residual *cycle* gap remains — see §B9 — from a different, non-cache
+  cause.)
+
+### B9. Load->load-address (gather) dependency under-charged by ~2 cycles *(FIXED)*
+- **Symptom:** on gather/pointer-chase code the VP runs **too fast**. Integer SpMV
+  (same gather as the paper's kernel): VP 1,094,790 cyc vs RTL 1,262,614 (**−13%**),
+  even though D$ misses and instruction counts match (see §B8 verification).
+- **Isolated with a pure pointer-chase** (`ptr_chase_bench`: `idx = arr[idx];`, a
+  load whose *address* is the previous load's result; 4 KB array so all D$ hits —
+  no miss noise, no MUL/FP):
+
+  | ptr_chase | Instr | Cycles | D$ miss | cyc/iter |
+  |---|---:|---:|---:|---:|
+  | CVA6 RTL       | 2,002,600 | 3,205,274 | 256 | 8.01 |
+  | Fast VP (pen=1)| 2,002,617 | 2,405,099 | 257 | 6.01 |
+
+  Instr and D$ misses match, so the entire gap is dependency latency:
+  **RTL charges exactly +2.0 cycles per dependent-load-address vs the VP.**
+- **Root cause:** the VP charges `load_hit_penalty=1` for *any* load-use. But CVA6's
+  latency for a load whose result routes to **address generation of a following
+  load/store** (gather / pointer chase) is ~3 cycles, i.e. **~2 cycles more than a
+  load->ALU use**. The VP models both the same.
+- **Why it hid & why a global bump is WRONG:** `long_test3` (load->ALU) matches the
+  RTL exactly at `load_hit_penalty=1` (§B5). Setting the global penalty to 2 fixes
+  SpMV (−0.9%) but **breaks long_test3** (+18%). So the fix must be **targeted to
+  the load->address case only**, not all load-uses. Register-only microbenchmarks
+  have no dependent-load-address chains, so they never exposed it.
+- **Fix (implemented, `load_addr_penalty=2`):** a per-register "derives from a
+  recent load" **taint token**. A load taints its rd (at completion); address
+  arithmetic (add/shift/OP-IMM/OP) forwards the taint to its rd and **consumes
+  the source token** (so a value loaded once and reused — e.g. a PIC/GOT base
+  pointer — cannot keep re-tainting addresses); a load/store whose base (rs1) is
+  tainted pays a `load_addr_penalty`-cycle bubble (detection cycle + countdown).
+  Set `load_addr_penalty=0` to disable. New stat: `load_addr_events`.
+- **Verified (fast VP vs co-sim):**
+
+  | | RTL | VP+B9 | err | B9 fires |
+  |---|---:|---:|---:|---:|
+  | ptr_chase (isolated cause) | 3,205,274 | 3,205,097 | **−0.006%** | 399,999 |
+  | int SpMV (motivating case) | 1,262,614 | 1,200,581 | **−4.9%** (was −13%) | 57,901 |
+  | long_test3 (control, load->ALU) | (1,100,602) | 1,100,218 | unchanged | 0 |
+  | int_alu / int_nobranch (controls) | — | unchanged | — | 0 |
+  | mem_contention (no gather) | — | +67 cyc | negligible | 199 |
+
+  ptr_chase (the pure isolation) matches to 0.006%; SpMV −13%→−4.9% (within the
+  paper's 5.1% worst case); all load->ALU and register controls bit-identical
+  (0 false fires). A first cut without the token-consume step spuriously fired
+  204k times on mem_contention (a GOT base pointer) for +95k cycles — the
+  single-use token reduced that to 199 fires / +67 cycles.
+- **Scope note:** this is a *pipeline/timing* divergence, entirely separate from the
+  cache/replacement issue (§B8). The two SpMV causes are now decomposed: memory =
+  §B8 (fixed), cycles = §B9 (this). For the paper's revision, the SpMV residual is
+  **replacement policy + gather-load latency**, not the "blocking D-cache."
 
 ---
 

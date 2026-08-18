@@ -1155,6 +1155,17 @@ void CPURV64P6_Cycle::Issue_stage() {
     return;
   }
 
+  // --- Load->address dependency bubble (gather/pointer-chase, BUGS §B9) ---
+  // Consume any pending extra cycles from a load result feeding a load/store
+  // address before dispatching this instruction.
+  if (load_addr_extra > 0) {
+    load_addr_extra--;
+    stall_issue = true;
+    issue_ex_next.valid = false;
+    stats.stalls++;
+    return;
+  }
+
   // --- Functional unit classification (must precede structural hazard check)
   // --- For M-extension: funct3 0-3 = multiply family, funct3 4-7 =
   // divide/remainder family.
@@ -1356,6 +1367,51 @@ void CPURV64P6_Cycle::Issue_stage() {
     return;
   }
 
+  // --- Load->address dependency (gather/pointer-chase, BUGS §B9) ---
+  // A loaded value that flows (through address arithmetic) into a subsequent
+  // load/store ADDRESS costs CVA6 ~load_addr_penalty extra cycles vs the VP.
+  // Track a per-register "derives from a recent load" taint: loads taint their
+  // rd (at completion, in EX); address-arithmetic ALU ops (add/shift/etc.)
+  // propagate the taint; a memory op whose base (rs1) is tainted pays the bubble.
+  {
+    uint32_t op = id_issue_reg.opcode;
+    uint8_t  rs1 = id_issue_reg.rs1, rd = id_issue_reg.rd;
+    bool is_mem = (op == 0x03 || op == 0x23 || op == 0x07 || op == 0x27 || op == 0x2F);
+
+    if (load_addr_penalty > 0 && is_mem && rs1 != 0 &&
+        ((reg_load_tainted >> rs1) & 1u)) {
+      // The detection cycle is already one stall, so the countdown adds the
+      // remaining (penalty-1) to make the total extra latency == load_addr_penalty.
+      load_addr_extra = load_addr_penalty - 1;
+      stats.load_addr_events++;
+      reg_load_tainted &= ~(1u << rs1); // charge once per produced address value
+      stall_issue = true;
+      issue_ex_next.valid = false;
+      stats.stalls++;
+      return;
+    }
+
+    // Taint propagation for the *next* instruction. Address arithmetic
+    // (OP-IMM/OP, incl. word forms) that reads a tainted source keeps the taint;
+    // any other non-load writer clears it. Loads taint rd at completion (EX).
+    if (rd != 0) {
+      bool is_addr_alu = (op == 0x13 || op == 0x33 || op == 0x1B || op == 0x3B);
+      bool src_tainted = ((reg_load_tainted >> rs1) & 1u) ||
+                         ((reg_load_tainted >> id_issue_reg.rs2) & 1u);
+      if (is_addr_alu && src_tainted) {
+        // Forward the taint as a single-use TOKEN: consume the source(s) so a
+        // value loaded once and reused (e.g. a PIC/GOT base pointer) does not
+        // keep re-tainting addresses. A genuine gather/chase re-loads each
+        // iteration, so its token is re-created and keeps firing.
+        reg_load_tainted &= ~(1u << rs1);
+        reg_load_tainted &= ~(1u << id_issue_reg.rs2);
+        reg_load_tainted |= (1u << rd);
+      } else if (op != 0x03 && op != 0x07) { // not a load (loads taint in EX)
+        reg_load_tainted &= ~(1u << rd);
+      }
+    }
+  }
+
   // --- Structural hazard: multi-cycle FU still occupied ---
   // The scoreboard handles data hazards; this handles the case where two
   // independent MUL/DIV/FPU instructions compete for the same physical unit.
@@ -1553,6 +1609,7 @@ void CPURV64P6_Cycle::EX_stage() {
       axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
       scoreboard.complete(dcache_miss_fu.trans_id, dcache_miss_fu.result,
                           dcache_miss_fu.rd);
+      if (dcache_miss_fu.rd != 0) reg_load_tainted |= (1u << dcache_miss_fu.rd); // §B9
       dcache_miss_fu.busy = false;
     }
 #else
@@ -1560,6 +1617,7 @@ void CPURV64P6_Cycle::EX_stage() {
 
       scoreboard.complete(dcache_miss_fu.trans_id, dcache_miss_fu.result,
                           dcache_miss_fu.rd);
+      if (dcache_miss_fu.rd != 0) reg_load_tainted |= (1u << dcache_miss_fu.rd); // §B9
       dcache_miss_fu.busy = false;
     }
 #endif
@@ -1569,6 +1627,7 @@ void CPURV64P6_Cycle::EX_stage() {
     if (--load_hit_fu.remaining == 0) {
       scoreboard.complete(load_hit_fu.trans_id, load_hit_fu.result,
                           load_hit_fu.rd);
+      if (load_hit_fu.rd != 0) reg_load_tainted |= (1u << load_hit_fu.rd); // §B9
       load_hit_fu.busy = false;
     }
   }
@@ -3382,6 +3441,8 @@ void CPURV64P6_Cycle::printStats() const {
   }
   std::cout << "  Dual commits: " << stats.dual_commits
             << "  (cycles where 2 instrs committed)\n";
+  std::cout << "  Load->addr bubbles: " << stats.load_addr_events
+            << "  (B9 gather/pointer-chase penalties)\n";
   if (stats.cycles > 0)
     std::cout << "  Dual commit rate: " << std::fixed << std::setprecision(1)
               << (100.0 * stats.dual_commits / stats.cycles) << "%\n";

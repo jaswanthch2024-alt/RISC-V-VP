@@ -85,6 +85,7 @@ public:
         uint64_t s_instrs{0};            // Instructions committed in S-mode
         uint64_t u_instrs{0};            // Instructions committed in U-mode
         uint64_t dual_commits{0};        // Cycles where 2 instructions committed (dual-issue)
+        uint64_t load_addr_events{0};    // §B9: load->address dependency bubbles charged
 
         double get_cpi() const { return instructions > 0 ? (double)cycles / instructions : 0; }
         double get_ipc() const { return cycles > 0 ? (double)instructions / cycles : 0; }
@@ -375,6 +376,15 @@ private:
     int store_drain_remaining{0};  // Active write-through store cycles remaining
     int store_write_penalty{0};   // 0-cycle write-back store drain latency
     int load_hit_penalty{1};       // 1-cycle load-use stall on hits (L1 D$ latency)
+    // Extra cycles when a load result feeds a subsequent load/store ADDRESS
+    // (gather / pointer-chase). CVA6 routes a load result to address-generation
+    // ~2 cycles slower than to an ALU op; the VP under-charged this. Measured
+    // with a pure pointer-chase (+2.0 cyc/dependent-load). See docs/BUGS.md §B9.
+    // Set 0 to disable (reverts to the old load->ALU==load->address behaviour).
+    int load_addr_penalty{2};
+    uint32_t reg_load_tainted{0};  // per-reg taint: value derives (via address
+                                   // arithmetic) from a recent load result (§B9)
+    int      load_addr_extra{0};   // countdown of pending load->address stall cycles
 
     // CSR file — M+S+U privilege support (Phase 5/6/7).
     CSR_File csr;
