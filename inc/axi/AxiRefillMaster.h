@@ -44,15 +44,20 @@ public:
 
   // 16 B line / 8 B (64-bit) beats = 2 beats -- matches CVA6's
   // AxiRdBlenIcache/Dcache = ICACHE_LINE_WIDTH/AxiDataWidth - 1 = 1 (=2 beats).
-  static constexpr int BURST_BEATS = 2;
+  // Runtime-overridable (VP_AXI_BEATS env var, see CPU_P64_6_Cycle.cpp) for
+  // side-by-side "what if AxiDataWidth were wider" experiments ONLY -- CVA6
+  // RTL always uses 2 beats at its real 64-bit AXI width. Do not use a
+  // non-default beat count as an RTL-accuracy claim.
+  int burst_beats_ = 2;
 
   SC_HAS_PROCESS(AxiRefillMaster);
-  AxiRefillMaster(sc_module_name nm)
+  AxiRefillMaster(sc_module_name nm, int burst_beats = 2)
       : sc_module(nm), clk("clk"), rst_bar("rst_bar"),
         r_master0("r_master0"), w_master0("w_master0"),
         req_valid("req_valid"), req_addr("req_addr"),
         req_is_write("req_is_write"), req_wdata("req_wdata"),
-        resp_valid("resp_valid"), resp_data("resp_data") {
+        resp_valid("resp_valid"), resp_data("resp_data"),
+        burst_beats_(burst_beats) {
     SC_THREAD(master_process);
     sensitive << clk.pos();
     async_reset_signal_is(rst_bar, false);
@@ -65,12 +70,12 @@ public:
   r_payload burst_read(uint32_t addr) {
     ar_payload ar_item;
     ar_item.addr = addr;
-    ar_item.len = BURST_BEATS - 1;
+    ar_item.len = burst_beats_ - 1;
     ar_item.burst = Enc::AXBURST::INCR;
     r_master0.ar.Push(ar_item);
 
     r_payload r;
-    for (int beat = 0; beat < BURST_BEATS; beat++)
+    for (int beat = 0; beat < burst_beats_; beat++)
       r = r_master0.r.Pop(); // block for each beat; last beat completes the miss
     return r;
   }
@@ -91,7 +96,7 @@ public:
         w_master0.single_write(addr, req_wdata.read()); // blocks through arbiter+slave
         resp_data.write(0);
       } else {
-        r_payload r = burst_read(addr); // 2-beat INCR burst through arbiter+slave
+        r_payload r = burst_read(addr); // INCR burst (burst_beats_ beats) through arbiter+slave
         resp_data.write(r.data.to_uint64());
       }
 

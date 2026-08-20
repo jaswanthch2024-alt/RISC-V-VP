@@ -41,7 +41,7 @@ struct AxiContentionTop::Impl : public sc_module {
   local_axi::write::chan<>  ws;   // arbiter <-> slave (write)
 
   SC_HAS_PROCESS(Impl);
-  Impl(sc_module_name nm, sc_core::sc_clock* clk, int slave_latency)
+  Impl(sc_module_name nm, sc_core::sc_clock* clk, int slave_latency, int burst_beats)
       : sc_module(nm), clk_(clk), rst_bar("rst_bar"), rs("rs"), ws("ws") {
 
     arbiter = new AxiArbiter<axi::cfg::standard, NM, 4>("arbiter");
@@ -62,7 +62,7 @@ struct AxiContentionTop::Impl : public sc_module {
 
       rch[i] = new local_axi::read::chan<>(sc_gen_unique_name("rch"));
       wch[i] = new local_axi::write::chan<>(sc_gen_unique_name("wch"));
-      master[i] = new AxiRefillMaster(sc_gen_unique_name("axi_master"));
+      master[i] = new AxiRefillMaster(sc_gen_unique_name("axi_master"), burst_beats);
       master[i]->clk(*clk_);
       master[i]->rst_bar(rst_bar);
 
@@ -102,8 +102,8 @@ struct AxiContentionTop::Impl : public sc_module {
 
 // ---- PIMPL forwarding -------------------------------------------------------
 
-AxiContentionTop::AxiContentionTop(sc_core::sc_clock* clk, int slave_latency)
-    : impl_(new Impl("axi_contention", clk, slave_latency)) {}
+AxiContentionTop::AxiContentionTop(sc_core::sc_clock* clk, int slave_latency, int burst_beats)
+    : impl_(new Impl("axi_contention", clk, slave_latency, burst_beats)) {}
 
 AxiContentionTop::~AxiContentionTop() { /* impl_ owned by SystemC hierarchy */ }
 

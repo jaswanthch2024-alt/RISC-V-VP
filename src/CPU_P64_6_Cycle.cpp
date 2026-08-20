@@ -57,6 +57,20 @@ CPURV64P6_Cycle::CPURV64P6_Cycle(sc_core::sc_module_name const &name,
   // MMU: initialized here so it can use the already-constructed mem_intf.
   mmu = new MMU(mem_intf, /*ptw_mem_cycles=*/2);
 
+  // Cache replacement policy: LFSR (CVA6-accurate) by default. Set
+  // VP_CACHE_POLICY=LRU to switch both L1 caches to LRU for side-by-side
+  // comparison only -- LRU is NOT an RTL-accurate mode (real CVA6 always
+  // uses LFSR). See inc/Cache.h for why a fair LRU-vs-LFSR comparison needs
+  // workloads with genuine temporal locality, not just large sequential
+  // scans (which are LRU's textbook worst case).
+  if (const char *pol = std::getenv("VP_CACHE_POLICY")) {
+    if (std::string(pol) == "LRU") {
+      icache.set_policy(riscv_tlm::Cache<256, 4, 16>::Policy::LRU);
+      dcache.set_policy(riscv_tlm::Cache<256, 8, 16>::Policy::LRU);
+      logger->info("VP_CACHE_POLICY=LRU: both L1 caches set to LRU (non-RTL-accurate, comparison mode)");
+    }
+  }
+
   // Start the main simulation thread
   SC_THREAD(cycle_thread);
 
@@ -83,7 +97,17 @@ void CPURV64P6_Cycle::set_clock(sc_core::sc_clock *c) {
   // Build the AXI contention subsystem now that the clock exists. Elaboration
   // happens here (before sc_start), which is legal during module setup.
   if (clk && !axi_top) {
-    axi_top = new riscv_axi::AxiContentionTop(clk, axi_slave_latency);
+    // Burst length is 2 beats by default (matches CVA6's real 64-bit AXI
+    // width: 16B line / 8B beat = 2). Set VP_AXI_BEATS=1 to model a wider
+    // (128-bit) AxiDataWidth that fills a line in one beat, for side-by-side
+    // comparison only -- see AxiRefillMaster.h.
+    int burst_beats = 2;
+    if (const char *beats = std::getenv("VP_AXI_BEATS")) {
+      burst_beats = std::atoi(beats);
+      if (burst_beats < 1) burst_beats = 1;
+      logger->info("VP_AXI_BEATS={}: AXI refill burst length overridden (non-RTL-accurate unless =2)", burst_beats);
+    }
+    axi_top = new riscv_axi::AxiContentionTop(clk, axi_slave_latency, burst_beats);
   }
 #endif
 }
