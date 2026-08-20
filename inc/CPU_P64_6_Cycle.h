@@ -334,7 +334,28 @@ private:
     // FP divide/sqrt: iterative, NON-pipelined (like CVA6 FPnew's DIVSQRT block).
     // Blocking single unit — a second FP div/sqrt waits for the first.
     FunctionalUnitState fpu_divsqrt_fu;
-    FunctionalUnitState dcache_miss_fu;// Variable-latency LSU (D$ miss deferred completion)
+    // Variable-latency LSU (D$ miss deferred completion). Multi-slot so a
+    // second independent load's miss latency can overlap the first, matching
+    // CVA6's NrLoadBufEntries=2. Under AXI (single DCACHE master) only slot 0
+    // is ever used, preserving the existing AXI arbiter behaviour unchanged.
+#ifdef ENABLE_AXI_CONTENTION
+    static constexpr int DCACHE_MISS_SLOTS = 1;
+#else
+    static constexpr int DCACHE_MISS_SLOTS = 2;
+#endif
+    FunctionalUnitState dcache_miss_fu[DCACHE_MISS_SLOTS];
+    bool dcache_miss_fu_full() const {
+        for (int i = 0; i < DCACHE_MISS_SLOTS; i++) if (!dcache_miss_fu[i].busy) return false;
+        return true;
+    }
+    bool dcache_miss_fu_any_busy() const {
+        for (int i = 0; i < DCACHE_MISS_SLOTS; i++) if (dcache_miss_fu[i].busy) return true;
+        return false;
+    }
+    int dcache_miss_free_slot() const {
+        for (int i = 0; i < DCACHE_MISS_SLOTS; i++) if (!dcache_miss_fu[i].busy) return i;
+        return -1;
+    }
     FunctionalUnitState load_hit_fu;   // 1-cycle load-use stall (D$ hit / store-buf forward)
 
     struct FetchQueueEntry {
@@ -363,7 +384,7 @@ private:
     // produced by the arbiter+slave instead of the flat software counters.
     riscv_axi::AxiContentionTop* axi_top{nullptr};
     bool icache_axi_pending{false}; // an I$ refill is in flight through the arbiter
-    int  axi_slave_latency{4};      // calibration knob (uncontended refill ~= this + wrapper)
+    int  axi_slave_latency{0};      // Re-derived for genuine 2-beat AXI burst reads (was 1, single-beat): see docs/BUGS.md §B10
 #endif
 
     int icache_miss_remaining{0}; // Cycles until current I$ miss resolves
@@ -371,7 +392,7 @@ private:
     // (zero-wait-state SlaveFromFile memory). Measured from a streaming benchmark
     // at ~9.5 cyc/line. NOTE: calibrated to the co-sim testbench memory, not to a
     // real DRAM hierarchy — re-derive if a timed memory model is introduced.
-    int icache_miss_penalty{10};   // Settable before sc_start()
+    int icache_miss_penalty{7};    // Re-derived vs RTL: see docs/BUGS.md §B10 (was 10)
     int dcache_miss_penalty{10};   // Settable before sc_start()
     int store_drain_remaining{0};  // Active write-through store cycles remaining
     int store_write_penalty{0};   // 0-cycle write-back store drain latency
@@ -385,6 +406,13 @@ private:
     uint32_t reg_load_tainted{0};  // per-reg taint: value derives (via address
                                    // arithmetic) from a recent load result (§B9)
     int      load_addr_extra{0};   // countdown of pending load->address stall cycles
+    uint64_t diag_costall_cycles{0}; // TEMP DIAGNOSTIC: cycles where I$ miss AND D$ miss both active
+    uint64_t diag_zero_commit_cycles{0}; // TEMP DIAGNOSTIC: cycles with 0 instructions committed
+    uint64_t diag_if_empty_cycles{0}; // TEMP DIAGNOSTIC: fetch_queue empty when Issue wants to pop (RTL if_empty equivalent)
+    uint64_t diag_stall_run_len{0};      // TEMP: current consecutive zero-commit run length
+    uint64_t diag_stall_run_count{0};    // TEMP: number of completed stall runs
+    uint64_t diag_stall_run_sum{0};      // TEMP: sum of all completed run lengths
+    uint64_t diag_stall_run_max{0};      // TEMP: longest single stall run
 
     // CSR file — M+S+U privilege support (Phase 5/6/7).
     CSR_File csr;

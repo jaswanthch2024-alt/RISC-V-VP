@@ -192,7 +192,8 @@ public:
         spec_head = spec_tail = spec_count = 0;
     }
 
-    void flush_speculative(int branch_rob_idx, const Scoreboard<32>& scoreboard) {
+    template<std::size_t SB_SIZE>
+    void flush_speculative(int branch_rob_idx, const Scoreboard<SB_SIZE>& scoreboard) {
         while (spec_count > 0) {
             std::size_t prev = (spec_tail + SPEC_DEPTH - 1) % SPEC_DEPTH;
             int tid = spec[prev].trans_id;

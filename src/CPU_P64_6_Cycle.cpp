@@ -201,6 +201,7 @@ void CPURV64P6_Cycle::cycle_thread() {
           fetch_queue.erase(fetch_queue.begin());
         } else {
           fetch_id_reg.valid = false;
+          diag_if_empty_cycles++; // TEMP DIAGNOSTIC: true RTL if_empty equivalent
         }
       }
     }
@@ -258,6 +259,15 @@ void CPURV64P6_Cycle::cycle_thread() {
 
     // Update global cycle count and CSR hardware counters
     stats.cycles++;
+    if (commit_count_this_cycle == 0) { // TEMP DIAGNOSTIC
+      diag_zero_commit_cycles++;
+      diag_stall_run_len++;
+    } else if (diag_stall_run_len > 0) {
+      diag_stall_run_count++;
+      diag_stall_run_sum += diag_stall_run_len;
+      if (diag_stall_run_len > diag_stall_run_max) diag_stall_run_max = diag_stall_run_len;
+      diag_stall_run_len = 0;
+    }
 
     csr.tick_counters(commit_count_this_cycle);
 
@@ -1422,10 +1432,10 @@ void CPURV64P6_Cycle::Issue_stage() {
       // FP loads (0x07) are classified as FPU but share the single LSU/D$ path,
       // so they must also wait for dcache_miss_fu — otherwise a second FP load
       // overwrites the in-flight miss and its scoreboard entry never completes.
-      (id_issue_reg.opcode == 0x07 && dcache_miss_fu.busy) ||
+      (id_issue_reg.opcode == 0x07 && dcache_miss_fu_full()) ||
       (fu == FunctionalUnit::LSU &&
        (id_issue_reg.opcode == 0x03 || id_issue_reg.opcode == 0x2F) &&
-       (dcache_miss_fu.busy || load_hit_fu.busy))) {
+       (dcache_miss_fu_full() || load_hit_fu.busy))) {
     stall_issue = true;
     issue_ex_next.valid = false;
     stats.stalls++;
@@ -1470,7 +1480,7 @@ void CPURV64P6_Cycle::Issue_stage() {
   // no ROB-head PC comparison, and no duplicate-allocation edge case.
   if (id_issue_reg.opcode == 0x73) {
     bool multi_cycle_in_flight =
-        dcache_miss_fu.busy || mul_fu.busy || div_fu.busy || fpu_any_busy() ||
+        dcache_miss_fu_any_busy() || mul_fu.busy || div_fu.busy || fpu_any_busy() ||
         load_hit_fu.busy;
     if (multi_cycle_in_flight) {
       stall_issue = true;
@@ -1529,10 +1539,13 @@ void CPURV64P6_Cycle::Issue_stage() {
     }
     scoreboard.flush();
     store_buffer.flush_speculative();
+    for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
 #ifdef ENABLE_AXI_CONTENTION
-    if (dcache_miss_fu.busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+      if (dcache_miss_fu[i].busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
 #endif
-    mul_fu.busy = div_fu.busy = dcache_miss_fu.busy =
+      dcache_miss_fu[i].busy = false;
+    }
+    mul_fu.busy = div_fu.busy =
         load_hit_fu.busy = false;
     for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
   fpu_divsqrt_fu.busy = false;
@@ -1600,25 +1613,26 @@ void CPURV64P6_Cycle::EX_stage() {
       div_fu.busy = false;
     }
   }
-  if (dcache_miss_fu.busy) {
+  for (int dms = 0; dms < DCACHE_MISS_SLOTS; dms++) {
+    auto &dmf = dcache_miss_fu[dms];
+    if (!dmf.busy) continue;
     stats.dcache_miss_cycles++;
+    // TEMP DIAGNOSTIC: does an I$ miss and D$ miss ever actually overlap?
+    if (dms == 0 && icache_miss_remaining > 0) diag_costall_cycles++;
 #ifdef ENABLE_AXI_CONTENTION
     // AXI mode: the D$ refill completes when the arbiter+slave return the read
     // (may be delayed behind an I$ miss holding the shared port = contention).
     if (axi_top->done(riscv_axi::AxiContentionTop::DCACHE)) {
       axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
-      scoreboard.complete(dcache_miss_fu.trans_id, dcache_miss_fu.result,
-                          dcache_miss_fu.rd);
-      if (dcache_miss_fu.rd != 0) reg_load_tainted |= (1u << dcache_miss_fu.rd); // §B9
-      dcache_miss_fu.busy = false;
+      scoreboard.complete(dmf.trans_id, dmf.result, dmf.rd);
+      if (dmf.rd != 0) reg_load_tainted |= (1u << dmf.rd); // §B9
+      dmf.busy = false;
     }
 #else
-    if (--dcache_miss_fu.remaining == 0) {
-
-      scoreboard.complete(dcache_miss_fu.trans_id, dcache_miss_fu.result,
-                          dcache_miss_fu.rd);
-      if (dcache_miss_fu.rd != 0) reg_load_tainted |= (1u << dcache_miss_fu.rd); // §B9
-      dcache_miss_fu.busy = false;
+    if (--dmf.remaining == 0) {
+      scoreboard.complete(dmf.trans_id, dmf.result, dmf.rd);
+      if (dmf.rd != 0) reg_load_tainted |= (1u << dmf.rd); // §B9
+      dmf.busy = false;
     }
 #endif
   }
@@ -2022,6 +2036,7 @@ void CPURV64P6_Cycle::EX_stage() {
     uint64_t vaddr = issue_ex_reg.rs1_val + issue_ex_reg.imm;
     uint64_t addr =
         vaddr; // declared before goto to avoid crossing initialization
+    int cur_dcache_slot = -1; // slot allocated for THIS load's miss (if any)
 
     // Alignment check
     bool misaligned = false;
@@ -2117,16 +2132,20 @@ void CPURV64P6_Cycle::EX_stage() {
       if (tr.stall_cycles > 0) {
         // DTLB miss: add PTW latency to effective load latency.
         stats.dtlb_miss_cycles += static_cast<uint64_t>(tr.stall_cycles);
-        dcache_miss_fu.busy = true;
+        // Issue's structural hazard check (dcache_miss_fu_full()) already
+        // guaranteed a free slot before this load was dispatched.
+        cur_dcache_slot = dcache_miss_free_slot();
+        if (cur_dcache_slot < 0) cur_dcache_slot = 0; // defensive fallback
+        auto &dmf = dcache_miss_fu[cur_dcache_slot];
+        dmf.busy = true;
 #ifdef ENABLE_AXI_CONTENTION
         axi_top->request(riscv_axi::AxiContentionTop::DCACHE, tr.paddr);
 #else
-        dcache_miss_fu.remaining = tr.stall_cycles + dcache_miss_penalty - 1;
+        dmf.remaining = tr.stall_cycles + dcache_miss_penalty - 1;
 #endif
-        dcache_miss_fu.result =
-            0; // placeholder, overwritten below after real read
-        dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
-        dcache_miss_fu.rd = issue_ex_reg.rd;
+        dmf.result = 0; // placeholder, overwritten below after real read
+        dmf.trans_id = issue_ex_reg.rob_index;
+        dmf.rd = issue_ex_reg.rd;
         multi_cycle_dispatched = true;
         addr = tr.paddr;
         // Still perform the memory read so the result is ready when the stall
@@ -2254,22 +2273,26 @@ void CPURV64P6_Cycle::EX_stage() {
         break;
       }
       if (multi_cycle_dispatched) {
-        // DTLB miss already started dcache_miss_fu; fill in the real result.
-        dcache_miss_fu.result = mem_result;
+        // DTLB miss already started dcache_miss_fu[cur_dcache_slot]; fill in
+        // the real result on that same slot.
+        dcache_miss_fu[cur_dcache_slot >= 0 ? cur_dcache_slot : 0].result = mem_result;
       } else {
         // D$ timing check: hit → result available this cycle; miss → defer via
         // FU.
         if (!dcache.access(addr)) {
           stats.dcache_misses++;
-          dcache_miss_fu.busy = true;
+          cur_dcache_slot = dcache_miss_free_slot();
+          if (cur_dcache_slot < 0) cur_dcache_slot = 0; // defensive fallback
+          auto &dmf = dcache_miss_fu[cur_dcache_slot];
+          dmf.busy = true;
 #ifdef ENABLE_AXI_CONTENTION
           axi_top->request(riscv_axi::AxiContentionTop::DCACHE, addr);
 #else
-          dcache_miss_fu.remaining = dcache_miss_penalty - 1;
+          dmf.remaining = dcache_miss_penalty - 1;
 #endif
-          dcache_miss_fu.result = mem_result;
-          dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
-          dcache_miss_fu.rd = issue_ex_reg.rd;
+          dmf.result = mem_result;
+          dmf.trans_id = issue_ex_reg.rob_index;
+          dmf.rd = issue_ex_reg.rd;
           multi_cycle_dispatched = true;
         } else {
           // D$ hit: result available next cycle — load-use stall configured by load_hit_penalty.
@@ -2664,19 +2687,19 @@ void CPURV64P6_Cycle::EX_stage() {
       cancel_if_flushed(div_fu);
       for (int fs = 0; fs < FPU_SLOTS; fs++) cancel_if_flushed(fpu_pipe[fs]);
       cancel_if_flushed(fpu_divsqrt_fu);
+      for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
 #ifdef ENABLE_AXI_CONTENTION
-      // Selective flush: release the D$ AXI refill only if this branch actually
-      // cancelled it (younger than the mispredicted branch). An older, still-
-      // valid D$ miss keeps its in-flight request.
-      {
-        bool was_busy = dcache_miss_fu.busy;
-        cancel_if_flushed(dcache_miss_fu);
-        if (was_busy && !dcache_miss_fu.busy)
+        // Selective flush: release the D$ AXI refill only if this branch
+        // actually cancelled it (younger than the mispredicted branch). An
+        // older, still-valid D$ miss keeps its in-flight request.
+        bool was_busy = dcache_miss_fu[i].busy;
+        cancel_if_flushed(dcache_miss_fu[i]);
+        if (was_busy && !dcache_miss_fu[i].busy)
           axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
-      }
 #else
-      cancel_if_flushed(dcache_miss_fu);
+        cancel_if_flushed(dcache_miss_fu[i]);
 #endif
+      }
       cancel_if_flushed(load_hit_fu);
     }
   }
@@ -3121,15 +3144,18 @@ void CPURV64P6_Cycle::EX_stage() {
       // FP load that missed in the D$: defer completion by the miss penalty,
       // exactly as the integer load path does. The FP register file was already
       // written by execute(); only the timing is modelled here.
-      dcache_miss_fu.busy = true;
+      int fp_slot = dcache_miss_free_slot();
+      if (fp_slot < 0) fp_slot = 0; // defensive fallback
+      auto &dmf = dcache_miss_fu[fp_slot];
+      dmf.busy = true;
 #ifdef ENABLE_AXI_CONTENTION
       axi_top->request(riscv_axi::AxiContentionTop::DCACHE, fp_load_pa);
 #else
-      dcache_miss_fu.remaining = dcache_miss_penalty - 1;
+      dmf.remaining = dcache_miss_penalty - 1;
 #endif
-      dcache_miss_fu.result = fpu_result;
-      dcache_miss_fu.trans_id = issue_ex_reg.rob_index;
-      dcache_miss_fu.rd = issue_ex_reg.rd;
+      dmf.result = fpu_result;
+      dmf.trans_id = issue_ex_reg.rob_index;
+      dmf.rd = issue_ex_reg.rd;
     } else if (latency <= 1) {
       // Single-cycle FPU ops (FMV, FCLASS, etc.): complete immediately.
       scoreboard.complete(issue_ex_reg.rob_index, fpu_result, issue_ex_reg.rd);
@@ -3197,10 +3223,13 @@ ex_done:
 
     scoreboard.flush();
     store_buffer.flush_speculative();
+    for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
 #ifdef ENABLE_AXI_CONTENTION
-    if (dcache_miss_fu.busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+      if (dcache_miss_fu[i].busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
 #endif
-    mul_fu.busy = div_fu.busy = dcache_miss_fu.busy =
+      dcache_miss_fu[i].busy = false;
+    }
+    mul_fu.busy = div_fu.busy =
         load_hit_fu.busy = false;
     for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
   fpu_divsqrt_fu.busy = false;
@@ -3347,10 +3376,13 @@ bool CPURV64P6_Cycle::cpu_process_IRQ() {
 
   scoreboard.flush();
   store_buffer.flush_speculative();
+  for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
 #ifdef ENABLE_AXI_CONTENTION
-  if (dcache_miss_fu.busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
+    if (dcache_miss_fu[i].busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
 #endif
-  mul_fu.busy = div_fu.busy = dcache_miss_fu.busy = false;
+    dcache_miss_fu[i].busy = false;
+  }
+  mul_fu.busy = div_fu.busy = false;
   for (int fs = 0; fs < FPU_SLOTS; fs++) fpu_pipe[fs].busy = false;
   fpu_divsqrt_fu.busy = false;
   stall_ex = false; // Cancel any pending EX replay
@@ -3443,6 +3475,17 @@ void CPURV64P6_Cycle::printStats() const {
             << "  (cycles where 2 instrs committed)\n";
   std::cout << "  Load->addr bubbles: " << stats.load_addr_events
             << "  (B9 gather/pointer-chase penalties)\n";
+  std::cout << "  DIAG I\$+D\$ co-stall cycles: " << diag_costall_cycles
+            << "  (I$ miss AND D$ miss both active same cycle)\n";
+  std::cout << "  DIAG zero-commit cycles: " << diag_zero_commit_cycles
+            << "  (" << (stats.cycles > 0 ? 100.0 * diag_zero_commit_cycles / stats.cycles : 0)
+            << "% of total cycles produce NO forward progress)\n";
+  std::cout << "  DIAG stall runs: " << diag_stall_run_count
+            << "  avg_len=" << (diag_stall_run_count ? (double)diag_stall_run_sum / diag_stall_run_count : 0.0)
+            << "  max_len=" << diag_stall_run_max << "\n";
+  std::cout << "  DIAG if_empty cycles: " << diag_if_empty_cycles
+            << "  (" << (stats.cycles > 0 ? 100.0 * diag_if_empty_cycles / stats.cycles : 0)
+            << "% -- RTL if_empty was 6.8%)\n";
   if (stats.cycles > 0)
     std::cout << "  Dual commit rate: " << std::fixed << std::setprecision(1)
               << (100.0 * stats.dual_commits / stats.cycles) << "%\n";
