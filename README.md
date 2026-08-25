@@ -8,6 +8,8 @@ an optional real-AXI memory-contention model validated against CVA6 RTL co-simul
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![SystemC](https://img.shields.io/badge/SystemC-3.0.2-green.svg)](https://www.accellera.org/downloads/standards/systemc)
 
+**Repository:** [github.com/jaswanthch2024-alt/RISC-V-VP](https://github.com/jaswanthch2024-alt/RISC-V-VP)
+
 ---
 
 ## What This Is
@@ -28,7 +30,7 @@ external beyond a C++17 compiler and CMake to build the default model.
 ## Quick Start — Build & Test on Your Own Desktop
 
 ```bash
-git clone <this-repo-url> riscv-vp
+git clone https://github.com/jaswanthch2024-alt/RISC-V-VP.git riscv-vp
 cd riscv-vp
 
 # Build the default cycle-accurate model
