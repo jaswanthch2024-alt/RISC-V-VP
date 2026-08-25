@@ -4,8 +4,11 @@
 // source (I$, D$, later store-drain). Used ONLY by the CYCLE6_AXI build.
 //
 // Handshake (all sc_signal, so ordering within a delta is irrelevant):
-//   pipeline -> master : req_valid (pulse/hold), req_addr
+//   pipeline -> master : req_valid (pulse/hold), req_addr, req_wdata (real data)
 //   master -> pipeline : resp_valid (held until pipeline drops req_valid), resp_data
+// resp_data carries the CPU's real value (echoed from req_wdata on reads too,
+// not just writes) -- the burst itself still runs for real timing/arbitration,
+// but its own synthetic payload is discarded. See AxiContentionTop.h.
 //
 // Reads issue a real AXI INCR burst, not a single beat: CVA6's own AXI adapter
 // (wt_axi_adapter.sv) computes AxiRdBlenIcache/Dcache = LINE_WIDTH/AxiDataWidth-1
@@ -21,11 +24,12 @@
 #pragma once
 
 #include "axi4_segment.h"
+#include "axi/AxiConfigSelect.h"
 
 namespace riscv_axi {
 
 class AxiRefillMaster : public sc_module,
-                        public axi::axi4_segment<axi::cfg::standard> {
+                        public axi::axi4_segment<AxiCfg> {
 public:
   sc_in<bool>          clk;
   sc_in<bool>          rst_bar;
@@ -38,9 +42,13 @@ public:
   sc_in<bool>          req_valid;
   sc_in<uint32_t>      req_addr;
   sc_in<bool>          req_is_write; // false=read (I$/D$), true=write (store-drain)
-  sc_in<uint32_t>      req_wdata;
+  // The CPU's real value: for a write, the data being stored; for a read, the
+  // value already fetched via mem_intf/fetch_instruction (see
+  // AxiContentionTop::request()'s doc comment) -- widened to 64 bits so it
+  // can hold a full doubleword (e.g. `ld`), not just the low 32 bits.
+  sc_in<uint64_t>      req_wdata;
   sc_out<bool>         resp_valid;
-  sc_out<uint32_t>     resp_data;
+  sc_out<uint64_t>     resp_data;
 
   // 16 B line / 8 B (64-bit) beats = 2 beats -- matches CVA6's
   // AxiRdBlenIcache/Dcache = ICACHE_LINE_WIDTH/AxiDataWidth - 1 = 1 (=2 beats).
@@ -96,8 +104,15 @@ public:
         w_master0.single_write(addr, req_wdata.read()); // blocks through arbiter+slave
         resp_data.write(0);
       } else {
-        r_payload r = burst_read(addr); // INCR burst (burst_beats_ beats) through arbiter+slave
-        resp_data.write(r.data.to_uint64());
+        // Real AXI INCR burst (burst_beats_ beats) through arbiter+slave --
+        // preserves exact timing/arbitration. The burst's own data (from
+        // MinimalAxiMemSlave's self-contained toy array) is intentionally
+        // discarded: resp_data carries the CPU's real fetched value instead
+        // (set via req_wdata -- see AxiContentionTop::request()/
+        // set_pending_wdata()), so the channel is data-correct, not just
+        // timing-correct.
+        burst_read(addr);
+        resp_data.write(req_wdata.read());
       }
 
       // Signal completion and hold until the pipeline acknowledges by

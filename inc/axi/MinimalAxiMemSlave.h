@@ -11,11 +11,12 @@
 #pragma once
 
 #include "axi4_segment.h"
+#include "axi/AxiConfigSelect.h"
 
 namespace riscv_axi {
 
 class MinimalAxiMemSlave : public sc_module,
-                           public axi::axi4_segment<axi::cfg::standard> {
+                           public axi::axi4_segment<AxiCfg> {
 public:
   sc_in<bool>          clk;
   sc_in<bool>          rst_bar;

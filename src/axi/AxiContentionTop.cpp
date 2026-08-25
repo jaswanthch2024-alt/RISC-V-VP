@@ -11,11 +11,12 @@
 #include <nvhls_assert.h>
 #include <axi/AxiArbiter.h>
 #include "axi/AxiRefillMaster.h"
+#include "axi/AxiConfigSelect.h"
 #include "axi/MinimalAxiMemSlave.h"
 
 namespace riscv_axi {
 
-typedef axi::axi4<axi::cfg::standard> local_axi;
+typedef axi::axi4<riscv_axi::AxiCfg> local_axi;
 static const int NM = AxiContentionTop::NUM_MASTERS;
 
 struct AxiContentionTop::Impl : public sc_module {
@@ -26,14 +27,14 @@ struct AxiContentionTop::Impl : public sc_module {
   sc_signal<bool>     req_valid[NM];
   sc_signal<uint32_t> req_addr[NM];
   sc_signal<bool>     req_is_write[NM];
-  sc_signal<uint32_t> req_wdata[NM];
+  sc_signal<uint64_t> req_wdata[NM];
   sc_signal<bool>     resp_valid[NM];
-  sc_signal<uint32_t> resp_data[NM];
+  sc_signal<uint64_t> resp_data[NM];
   bool                busy_[NM];
 
   AxiRefillMaster*     master[NM];
   MinimalAxiMemSlave*  slave;
-  AxiArbiter<axi::cfg::standard, NM, 4>* arbiter;
+  AxiArbiter<riscv_axi::AxiCfg, NM, 4>* arbiter;
 
   local_axi::read::chan<>*  rch[NM];
   local_axi::write::chan<>* wch[NM];
@@ -44,7 +45,7 @@ struct AxiContentionTop::Impl : public sc_module {
   Impl(sc_module_name nm, sc_core::sc_clock* clk, int slave_latency, int burst_beats)
       : sc_module(nm), clk_(clk), rst_bar("rst_bar"), rs("rs"), ws("ws") {
 
-    arbiter = new AxiArbiter<axi::cfg::standard, NM, 4>("arbiter");
+    arbiter = new AxiArbiter<riscv_axi::AxiCfg, NM, 4>("arbiter");
     arbiter->clk(*clk_);
     arbiter->reset_bar(rst_bar);
 
@@ -107,7 +108,7 @@ AxiContentionTop::AxiContentionTop(sc_core::sc_clock* clk, int slave_latency, in
 
 AxiContentionTop::~AxiContentionTop() { /* impl_ owned by SystemC hierarchy */ }
 
-void AxiContentionTop::request(int m, uint64_t addr, bool is_write, uint32_t wdata) {
+void AxiContentionTop::request(int m, uint64_t addr, bool is_write, uint64_t wdata) {
   impl_->req_addr[m].write(static_cast<uint32_t>(addr));
   impl_->req_is_write[m].write(is_write);
   impl_->req_wdata[m].write(wdata);
@@ -115,9 +116,13 @@ void AxiContentionTop::request(int m, uint64_t addr, bool is_write, uint32_t wda
   impl_->busy_[m] = true;
 }
 
+void AxiContentionTop::set_pending_wdata(int m, uint64_t wdata) {
+  impl_->req_wdata[m].write(wdata);
+}
+
 bool AxiContentionTop::done(int m) const { return impl_->resp_valid[m].read(); }
 
-uint32_t AxiContentionTop::data(int m) const { return impl_->resp_data[m].read(); }
+uint64_t AxiContentionTop::data(int m) const { return impl_->resp_data[m].read(); }
 
 void AxiContentionTop::ack(int m) {
   impl_->req_valid[m].write(false);

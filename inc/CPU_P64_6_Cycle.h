@@ -39,6 +39,7 @@
 #include "MMU.h"
 #ifdef ENABLE_AXI_CONTENTION
 #include "axi/AxiContentionTop.h"
+#include "axi/AxiConfigSelect.h"
 #endif
 
 namespace riscv_tlm {
@@ -338,22 +339,33 @@ private:
     // second independent load's miss latency can overlap the first, matching
     // CVA6's NrLoadBufEntries=2. Under AXI (single DCACHE master) only slot 0
     // is ever used, preserving the existing AXI arbiter behaviour unchanged.
+    //
+    // dcache_miss_slots_active is runtime-settable (VP_DCACHE_SLOTS env var, see
+    // CPU_P64_6_Cycle.cpp) for side-by-side "what if the D$ were non-blocking like
+    // CVA6's HPDcache option" experiments ONLY -- the RTL-accurate default (1 with
+    // AXI, 2 without) mirrors the WT cache's single-MSHR blocking behaviour. A
+    // higher slot count is a directional experiment, not an RTL-accuracy claim
+    // (HPDcache's real MSHR capacity is 64 sets x 2 ways = up to 128 outstanding
+    // misses; MAX_DCACHE_MISS_SLOTS is capped far below that as a practical
+    // array bound, not a claim of matching HPDcache exactly).
+    static constexpr int MAX_DCACHE_MISS_SLOTS = 8;
 #ifdef ENABLE_AXI_CONTENTION
-    static constexpr int DCACHE_MISS_SLOTS = 1;
+    static constexpr int DCACHE_MISS_SLOTS_DEFAULT = 1;
 #else
-    static constexpr int DCACHE_MISS_SLOTS = 2;
+    static constexpr int DCACHE_MISS_SLOTS_DEFAULT = 2;
 #endif
-    FunctionalUnitState dcache_miss_fu[DCACHE_MISS_SLOTS];
+    int dcache_miss_slots_active{DCACHE_MISS_SLOTS_DEFAULT};
+    FunctionalUnitState dcache_miss_fu[MAX_DCACHE_MISS_SLOTS];
     bool dcache_miss_fu_full() const {
-        for (int i = 0; i < DCACHE_MISS_SLOTS; i++) if (!dcache_miss_fu[i].busy) return false;
+        for (int i = 0; i < dcache_miss_slots_active; i++) if (!dcache_miss_fu[i].busy) return false;
         return true;
     }
     bool dcache_miss_fu_any_busy() const {
-        for (int i = 0; i < DCACHE_MISS_SLOTS; i++) if (dcache_miss_fu[i].busy) return true;
+        for (int i = 0; i < dcache_miss_slots_active; i++) if (dcache_miss_fu[i].busy) return true;
         return false;
     }
     int dcache_miss_free_slot() const {
-        for (int i = 0; i < DCACHE_MISS_SLOTS; i++) if (!dcache_miss_fu[i].busy) return i;
+        for (int i = 0; i < dcache_miss_slots_active; i++) if (!dcache_miss_fu[i].busy) return i;
         return -1;
     }
     FunctionalUnitState load_hit_fu;   // 1-cycle load-use stall (D$ hit / store-buf forward)

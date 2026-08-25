@@ -3,6 +3,7 @@
 #include "CLINT.h"
 #include "spdlog/spdlog.h"
 #include <iostream>
+#include <cstdlib>
 
 uint64_t global_cpu_cycle = 0;
 
@@ -71,6 +72,21 @@ CPURV64P6_Cycle::CPURV64P6_Cycle(sc_core::sc_module_name const &name,
     }
   }
 
+  // D$ outstanding-miss slots: DCACHE_MISS_SLOTS_DEFAULT (RTL-accurate, matches
+  // the WT cache's single-MSHR blocking behaviour) by default. Set
+  // VP_DCACHE_SLOTS=N (up to MAX_DCACHE_MISS_SLOTS) to model a non-blocking D$
+  // with more concurrent outstanding misses in flight, for side-by-side
+  // comparison only -- this is NOT an RTL-accurate mode for the WT config we
+  // validate against (real CVA6 would need the HPDcache option, a structurally
+  // different cache, to get this concurrency -- see docs/BUGS.md §B7).
+  if (const char *slots = std::getenv("VP_DCACHE_SLOTS")) {
+    int n = std::atoi(slots);
+    if (n < 1) n = 1;
+    if (n > MAX_DCACHE_MISS_SLOTS) n = MAX_DCACHE_MISS_SLOTS;
+    dcache_miss_slots_active = n;
+    logger->info("VP_DCACHE_SLOTS={}: D$ outstanding-miss slots overridden (non-RTL-accurate unless ={})", n, DCACHE_MISS_SLOTS_DEFAULT);
+  }
+
   // Start the main simulation thread
   SC_THREAD(cycle_thread);
 
@@ -97,15 +113,19 @@ void CPURV64P6_Cycle::set_clock(sc_core::sc_clock *c) {
   // Build the AXI contention subsystem now that the clock exists. Elaboration
   // happens here (before sc_start), which is legal during module setup.
   if (clk && !axi_top) {
-    // Burst length is 2 beats by default (matches CVA6's real 64-bit AXI
-    // width: 16B line / 8B beat = 2). Set VP_AXI_BEATS=1 to model a wider
-    // (128-bit) AxiDataWidth that fills a line in one beat, for side-by-side
-    // comparison only -- see AxiRefillMaster.h.
-    int burst_beats = 2;
+    // Burst length is derived from the AXI data width the arbiter/slave were
+    // actually built at (riscv_axi::AxiCfg, see AxiConfigSelect.h): 16B line /
+    // (dataWidth/8) bytes-per-beat. Default 64-bit build -> 2 beats (matches
+    // CVA6's real AXI width, verified against wt_axi_adapter.sv's own formula).
+    // TIMING_MODEL=CYCLE6_AXI128 build -> 1 beat (genuinely 128-bit wide, not
+    // an approximation). VP_AXI_BEATS still overrides either build's default
+    // for further side-by-side experiments -- see AxiRefillMaster.h.
+    int burst_beats = 16 / (riscv_axi::AxiCfg::dataWidth / 8);
+    if (burst_beats < 1) burst_beats = 1;
     if (const char *beats = std::getenv("VP_AXI_BEATS")) {
       burst_beats = std::atoi(beats);
       if (burst_beats < 1) burst_beats = 1;
-      logger->info("VP_AXI_BEATS={}: AXI refill burst length overridden (non-RTL-accurate unless =2)", burst_beats);
+      logger->info("VP_AXI_BEATS={}: AXI refill burst length overridden (non-RTL-accurate unless ={})", burst_beats, 16 / (riscv_axi::AxiCfg::dataWidth / 8));
     }
     axi_top = new riscv_axi::AxiContentionTop(clk, axi_slave_latency, burst_beats);
   }
@@ -1563,7 +1583,7 @@ void CPURV64P6_Cycle::Issue_stage() {
     }
     scoreboard.flush();
     store_buffer.flush_speculative();
-    for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
+    for (int i = 0; i < dcache_miss_slots_active; i++) {
 #ifdef ENABLE_AXI_CONTENTION
       if (dcache_miss_fu[i].busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
 #endif
@@ -1637,7 +1657,7 @@ void CPURV64P6_Cycle::EX_stage() {
       div_fu.busy = false;
     }
   }
-  for (int dms = 0; dms < DCACHE_MISS_SLOTS; dms++) {
+  for (int dms = 0; dms < dcache_miss_slots_active; dms++) {
     auto &dmf = dcache_miss_fu[dms];
     if (!dmf.busy) continue;
     stats.dcache_miss_cycles++;
@@ -1648,7 +1668,22 @@ void CPURV64P6_Cycle::EX_stage() {
     // (may be delayed behind an I$ miss holding the shared port = contention).
     if (axi_top->done(riscv_axi::AxiContentionTop::DCACHE)) {
       axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
-      scoreboard.complete(dmf.trans_id, dmf.result, dmf.rd);
+      // Use the value that actually came back through the AXI channel (real
+      // data, see AxiContentionTop::request()/set_pending_wdata()), not the
+      // pre-fetched dmf.result directly -- this is what makes the channel
+      // load-bearing rather than decorative. They must always be equal; the
+      // assert is the correctness proof that the data path is wired right.
+      uint64_t axi_result = axi_top->data(riscv_axi::AxiContentionTop::DCACHE);
+      // Deliberately NOT assert() -- this project builds Release (NDEBUG),
+      // which would silently strip the check. This is the correctness proof
+      // that the AXI channel's data path is wired right; it must always run.
+      if (axi_result != dmf.result) {
+        logger->error("AXI channel data mismatch: got {:#x}, expected {:#x} "
+                      "(direct mem_intf/fpu fetch) -- data path bug",
+                      axi_result, dmf.result);
+        std::abort();
+      }
+      scoreboard.complete(dmf.trans_id, axi_result, dmf.rd);
       if (dmf.rd != 0) reg_load_tainted |= (1u << dmf.rd); // §B9
       dmf.busy = false;
     }
@@ -2297,9 +2332,16 @@ void CPURV64P6_Cycle::EX_stage() {
         break;
       }
       if (multi_cycle_dispatched) {
-        // DTLB miss already started dcache_miss_fu[cur_dcache_slot]; fill in
-        // the real result on that same slot.
-        dcache_miss_fu[cur_dcache_slot >= 0 ? cur_dcache_slot : 0].result = mem_result;
+        // DTLB miss already started dcache_miss_fu[cur_dcache_slot] before
+        // mem_result was known (request() above was posted with a
+        // placeholder); fill in the real result on that same slot now, and
+        // (AXI build) update the in-flight request's real value too so
+        // axi_top->data() returns the correct value once done().
+        int slot = cur_dcache_slot >= 0 ? cur_dcache_slot : 0;
+        dcache_miss_fu[slot].result = mem_result;
+#ifdef ENABLE_AXI_CONTENTION
+        axi_top->set_pending_wdata(riscv_axi::AxiContentionTop::DCACHE, mem_result);
+#endif
       } else {
         // D$ timing check: hit → result available this cycle; miss → defer via
         // FU.
@@ -2310,7 +2352,9 @@ void CPURV64P6_Cycle::EX_stage() {
           auto &dmf = dcache_miss_fu[cur_dcache_slot];
           dmf.busy = true;
 #ifdef ENABLE_AXI_CONTENTION
-          axi_top->request(riscv_axi::AxiContentionTop::DCACHE, addr);
+          // mem_result is already known here (computed above) -- pass it so
+          // axi_top->data() returns the CPU's real value, not a placeholder.
+          axi_top->request(riscv_axi::AxiContentionTop::DCACHE, addr, false, mem_result);
 #else
           dmf.remaining = dcache_miss_penalty - 1;
 #endif
@@ -2711,7 +2755,7 @@ void CPURV64P6_Cycle::EX_stage() {
       cancel_if_flushed(div_fu);
       for (int fs = 0; fs < FPU_SLOTS; fs++) cancel_if_flushed(fpu_pipe[fs]);
       cancel_if_flushed(fpu_divsqrt_fu);
-      for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
+      for (int i = 0; i < dcache_miss_slots_active; i++) {
 #ifdef ENABLE_AXI_CONTENTION
         // Selective flush: release the D$ AXI refill only if this branch
         // actually cancelled it (younger than the mispredicted branch). An
@@ -3173,7 +3217,10 @@ void CPURV64P6_Cycle::EX_stage() {
       auto &dmf = dcache_miss_fu[fp_slot];
       dmf.busy = true;
 #ifdef ENABLE_AXI_CONTENTION
-      axi_top->request(riscv_axi::AxiContentionTop::DCACHE, fp_load_pa);
+      // fpu_result is already known here (FP regfile was written by
+      // execute()) -- pass it through so axi_top->data() returns the real
+      // value instead of a placeholder.
+      axi_top->request(riscv_axi::AxiContentionTop::DCACHE, fp_load_pa, false, fpu_result);
 #else
       dmf.remaining = dcache_miss_penalty - 1;
 #endif
@@ -3247,7 +3294,7 @@ ex_done:
 
     scoreboard.flush();
     store_buffer.flush_speculative();
-    for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
+    for (int i = 0; i < dcache_miss_slots_active; i++) {
 #ifdef ENABLE_AXI_CONTENTION
       if (dcache_miss_fu[i].busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
 #endif
@@ -3400,7 +3447,7 @@ bool CPURV64P6_Cycle::cpu_process_IRQ() {
 
   scoreboard.flush();
   store_buffer.flush_speculative();
-  for (int i = 0; i < DCACHE_MISS_SLOTS; i++) {
+  for (int i = 0; i < dcache_miss_slots_active; i++) {
 #ifdef ENABLE_AXI_CONTENTION
     if (dcache_miss_fu[i].busy) axi_top->ack(riscv_axi::AxiContentionTop::DCACHE);
 #endif

@@ -27,12 +27,23 @@ public:
   ~AxiContentionTop();
 
   // Post a memory request for master m (idempotent while held). Call once at a
-  // miss trigger, then poll done(m).
-  void request(int m, uint64_t addr, bool is_write = false, uint32_t wdata = 0);
+  // miss trigger, then poll done(m). `wdata` is the real value: for a write,
+  // the value being stored; for a read, the value the CPU already fetched via
+  // its normal (mem_intf/fetch_instruction) path -- this is handed back
+  // verbatim by data() once done(), so the AXI channel carries the CPU's
+  // actual data instead of a synthetic placeholder from the internal slave's
+  // toy backing array. Pass 0 if not yet known (see set_pending_wdata()).
+  void request(int m, uint64_t addr, bool is_write = false, uint64_t wdata = 0);
+  // Updates the real value for an already-posted, still-in-flight request
+  // (for the rare case -- e.g. a DTLB miss stacked with a D$ miss -- where
+  // the real value isn't known yet at request() time). Safe to call any time
+  // before done() first returns true.
+  void set_pending_wdata(int m, uint64_t wdata);
   // True once the request for m has completed through arbiter + slave.
   bool done(int m) const;
-  // Returned read data (valid when done(m)); unused in timing-only mode.
-  uint32_t data(int m) const;
+  // Returned read data (valid when done(m)): the real value passed to
+  // request()/set_pending_wdata(), handed back through the AXI channel.
+  uint64_t data(int m) const;
   // Acknowledge completion: drops the request so the master can serve the next.
   void ack(int m);
   // True while a request for m is in flight (posted, not yet acked).
