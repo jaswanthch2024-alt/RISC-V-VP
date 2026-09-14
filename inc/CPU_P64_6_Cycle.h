@@ -18,6 +18,7 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <cstdio>
 #include "tlm_utils/simple_initiator_socket.h"
 
 #include "CPU.h"
@@ -356,6 +357,16 @@ private:
 #endif
     int dcache_miss_slots_active{DCACHE_MISS_SLOTS_DEFAULT};
     FunctionalUnitState dcache_miss_fu[MAX_DCACHE_MISS_SLOTS];
+
+    // Opt-in D$ address trace dump (VP_DCACHE_TRACE=<path> env var, see
+    // constructor) -- one address per line, for offline cache-geometry
+    // sweep tools (tools/cache_sweep/) to replay against swept configs.
+    // Purely a diagnostic sink: never read back by the VP itself, zero
+    // effect on simulation behaviour when unset (the default).
+    std::FILE* dcache_trace_file{nullptr};
+    void trace_dcache_access(uint64_t addr) {
+        if (dcache_trace_file) std::fprintf(dcache_trace_file, "%lx\n", (unsigned long)addr);
+    }
     bool dcache_miss_fu_full() const {
         for (int i = 0; i < dcache_miss_slots_active; i++) if (!dcache_miss_fu[i].busy) return false;
         return true;

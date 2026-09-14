@@ -36,12 +36,12 @@ option(USE_LOCAL_SYSTEMC "Use vendored SystemC located in systemc/ subdir" ON)
 option(BUILD_ROBUST_HEX "Build robust_system_test hex images" ON)
 
 # Timing Model Selection (mutually exclusive)
-set(TIMING_MODEL "LT" CACHE STRING "CPU Timing Model: LT, AT, CYCLE, CYCLE6, CYCLE6_AXI, or CYCLE6_AXI128")
-set_property(CACHE TIMING_MODEL PROPERTY STRINGS "LT" "AT" "CYCLE" "CYCLE6" "CYCLE6_AXI" "CYCLE6_AXI128")
+set(TIMING_MODEL "LT" CACHE STRING "CPU Timing Model: LT, AT, CYCLE, CYCLE6, CYCLE6_AXI, CYCLE6_AXI128, CYCLE6_AXI256, CYCLE6_AXI512, or CYCLE6_AXI1024")
+set_property(CACHE TIMING_MODEL PROPERTY STRINGS "LT" "AT" "CYCLE" "CYCLE6" "CYCLE6_AXI" "CYCLE6_AXI128" "CYCLE6_AXI256" "CYCLE6_AXI512" "CYCLE6_AXI1024")
 
 # Validate timing model
-if(NOT TIMING_MODEL MATCHES "^(LT|AT|CYCLE|CYCLE6|CYCLE6_AXI|CYCLE6_AXI128)$")
-  message(FATAL_ERROR "Invalid TIMING_MODEL: ${TIMING_MODEL}. Must be LT, AT, CYCLE, CYCLE6, CYCLE6_AXI, or CYCLE6_AXI128.")
+if(NOT TIMING_MODEL MATCHES "^(LT|AT|CYCLE|CYCLE6|CYCLE6_AXI|CYCLE6_AXI128|CYCLE6_AXI256|CYCLE6_AXI512|CYCLE6_AXI1024)$")
+  message(FATAL_ERROR "Invalid TIMING_MODEL: ${TIMING_MODEL}. Must be LT, AT, CYCLE, CYCLE6, CYCLE6_AXI, CYCLE6_AXI128, CYCLE6_AXI256, CYCLE6_AXI512, or CYCLE6_AXI1024.")
 endif()
 
 message(STATUS "========================================")
@@ -145,18 +145,18 @@ if(ENABLE_PIPELINED_ISS)
     )
     target_compile_definitions(riscv_vp_core PUBLIC ENABLE_PIPELINED_ISS=1 ENABLE_CYCLE6_MODEL=1)
     message(STATUS "Pipelined ISS enabled with CYCLE6 (6-Stage Cycle-Accurate) model")
-  elseif(TIMING_MODEL STREQUAL "CYCLE6_AXI" OR TIMING_MODEL STREQUAL "CYCLE6_AXI128")
+  elseif(TIMING_MODEL MATCHES "^CYCLE6_AXI(128|256|512|1024)?$")
     # CYCLE6_AXI: same 6-stage pipeline + real matchlib AxiArbiter I$/D$
     # contention model (microbenchmark-only; NOT for Linux boot). Adds the
     # vendored, header-only matchlib kit and its required defines. Builds
     # against the VP's own SystemC 3.0.2 (verified in Phase 0).
     #
-    # CYCLE6_AXI128 is the same subsystem built against a 128-bit AXI data
-    # width (inc/axi/AxiConfigWide.h) instead of the RTL-accurate 64-bit
-    # default -- a compile-time build variant (matchlib AXI types are C++
-    # templates on the config, so this can't be a runtime flag like
+    # CYCLE6_AXI128/256/512/1024 are the same subsystem built against a wider
+    # AXI data width (inc/axi/AxiConfigWide.h) instead of the RTL-accurate
+    # 64-bit default -- a compile-time build variant (matchlib AXI types are
+    # C++ templates on the config, so this can't be a runtime flag like
     # VP_AXI_BEATS/VP_CACHE_POLICY/VP_DCACHE_SLOTS). Comparison-only: no CVA6
-    # target has ever shipped a 128-bit AXI config, see AxiConfigWide.h.
+    # target has ever shipped anything but 64-bit AXI, see AxiConfigWide.h.
     set(MATCHLIB_KIT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/matchlib_kit")
     if(NOT EXISTS "${MATCHLIB_KIT}/matchlib-main/cmod/include/axi/AxiArbiter.h")
       message(FATAL_ERROR "${TIMING_MODEL} needs the vendored matchlib kit at ${MATCHLIB_KIT} (missing).")
@@ -179,8 +179,9 @@ if(ENABLE_PIPELINED_ISS)
     target_compile_definitions(riscv_vp_core PUBLIC
       ENABLE_PIPELINED_ISS=1 ENABLE_CYCLE6_MODEL=1 ENABLE_AXI_CONTENTION=1
       CONNECTIONS_ACCURATE_SIM=1 HLS_CATAPULT=1 ENABLE_AC_VCD_TRACE=0)
-    if(TIMING_MODEL STREQUAL "CYCLE6_AXI128")
-      target_compile_definitions(riscv_vp_core PUBLIC AXI_WIDE128=1)
+    if(TIMING_MODEL MATCHES "^CYCLE6_AXI(128|256|512|1024)$")
+      string(REGEX REPLACE "^CYCLE6_AXI" "" AXI_WIDTH_BITS_VALUE "${TIMING_MODEL}")
+      target_compile_definitions(riscv_vp_core PUBLIC AXI_WIDTH_BITS=${AXI_WIDTH_BITS_VALUE})
     endif()
     # matchlib headers trip -Wall/-Wextra/-Wpedantic heavily; relax for the core
     # in this target so the (unmodified, vendored) kit compiles clean.
@@ -237,6 +238,18 @@ add_executable(RISCV_VP ${SRC_VP_MAIN} src/VPTop.cpp)
 target_link_libraries(RISCV_VP PRIVATE riscv_vp_core)
 if(NOT MSVC)
   target_compile_options(RISCV_VP PRIVATE -O3)
+endif()
+
+# axi_external_demo -- standalone proof that the VP's AXI master logic can
+# drive a real external AXI port boundary correctly (Track D). Only built
+# for CYCLE6_AXI* timing models, which is where AxiRefillMaster/
+# MinimalAxiMemSlave/matchlib are available at all. Reuses riscv_vp_core
+# (already carries the matchlib include paths under this timing model) --
+# does not touch VPTop/CPU_P64_6_Cycle/AxiContentionTop.
+if(TIMING_MODEL MATCHES "^CYCLE6_AXI(128|256|512|1024)?$")
+  add_executable(axi_external_demo tools/axi_external_demo/axi_external_demo.cpp)
+  target_link_libraries(axi_external_demo PRIVATE riscv_vp_core)
+  target_compile_options(axi_external_demo PRIVATE -Wno-error -Wno-unused-parameter -Wno-unused-variable -Wno-deprecated-declarations)
 endif()
 
 # =============================================================================

@@ -66,8 +66,8 @@ CPURV64P6_Cycle::CPURV64P6_Cycle(sc_core::sc_module_name const &name,
   // scans (which are LRU's textbook worst case).
   if (const char *pol = std::getenv("VP_CACHE_POLICY")) {
     if (std::string(pol) == "LRU") {
-      icache.set_policy(riscv_tlm::Cache<256, 4, 16>::Policy::LRU);
-      dcache.set_policy(riscv_tlm::Cache<256, 8, 16>::Policy::LRU);
+      icache.set_policy(decltype(icache)::Policy::LRU);
+      dcache.set_policy(decltype(dcache)::Policy::LRU);
       logger->info("VP_CACHE_POLICY=LRU: both L1 caches set to LRU (non-RTL-accurate, comparison mode)");
     }
   }
@@ -87,6 +87,18 @@ CPURV64P6_Cycle::CPURV64P6_Cycle(sc_core::sc_module_name const &name,
     logger->info("VP_DCACHE_SLOTS={}: D$ outstanding-miss slots overridden (non-RTL-accurate unless ={})", n, DCACHE_MISS_SLOTS_DEFAULT);
   }
 
+  // Opt-in D$ address trace dump, for offline cache-geometry sweep tools
+  // (tools/cache_sweep/) -- see trace_dcache_access() in CPU_P64_6_Cycle.h.
+  // Purely additive: unset by default, never read back by the VP itself.
+  if (const char *trace_path = std::getenv("VP_DCACHE_TRACE")) {
+    dcache_trace_file = std::fopen(trace_path, "w");
+    if (dcache_trace_file) {
+      logger->info("VP_DCACHE_TRACE={}: dumping every D$ access address for offline replay", trace_path);
+    } else {
+      logger->error("VP_DCACHE_TRACE={}: failed to open for writing", trace_path);
+    }
+  }
+
   // Start the main simulation thread
   SC_THREAD(cycle_thread);
 
@@ -103,6 +115,7 @@ CPURV64P6_Cycle::~CPURV64P6_Cycle() {
   delete f_inst;
   delete d_inst;
   delete mmu;
+  if (dcache_trace_file) std::fclose(dcache_trace_file);
 }
 
 void CPURV64P6_Cycle::set_clock(sc_core::sc_clock *c) {
@@ -2345,6 +2358,7 @@ void CPURV64P6_Cycle::EX_stage() {
       } else {
         // D$ timing check: hit → result available this cycle; miss → defer via
         // FU.
+        trace_dcache_access(addr);
         if (!dcache.access(addr)) {
           stats.dcache_misses++;
           cur_dcache_slot = dcache_miss_free_slot();
@@ -3072,6 +3086,7 @@ void CPURV64P6_Cycle::EX_stage() {
         goto ex_done;
       }
       // FP loads go through the same L1 D$ as integer loads (CVA6 has one LSU).
+      trace_dcache_access(pa);
       if (!dcache.access(pa)) {
         stats.dcache_misses++;
         fp_load_dcache_miss = true;
